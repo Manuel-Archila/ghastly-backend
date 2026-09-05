@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel, Field
+
+IncomeBasis = Literal["fixed", "previous_month", "avg_3m"]
+
+
+class BudgetItemCreate(BaseModel):
+    id: UUID
+    category_id: UUID
+    amount_cents: int = Field(ge=0)
+    rollover_enabled: bool | None = None
+    sort_order: int = 0
+
+
+class BudgetCreate(BaseModel):
+    id: UUID
+    name: str = Field(min_length=1, max_length=255)
+    period_type: Literal["monthly", "weekly", "custom"] = "monthly"
+    rollover_enabled: bool = False
+    global_limit_cents: int | None = Field(default=None, ge=0)
+    income_basis: IncomeBasis = "fixed"
+    fixed_income_cents: int | None = Field(default=None, ge=0)
+    items: list[BudgetItemCreate] = Field(default_factory=list)
+
+
+class BudgetUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    is_active: bool | None = None
+    rollover_enabled: bool | None = None
+    global_limit_cents: int | None = Field(default=None, ge=0)
+    income_basis: IncomeBasis | None = None
+    fixed_income_cents: int | None = Field(default=None, ge=0)
+
+
+class BudgetItemUpdate(BaseModel):
+    amount_cents: int | None = Field(default=None, ge=0)
+    rollover_enabled: bool | None = None
+    sort_order: int | None = None
+
+
+class BudgetItemOut(BaseModel):
+    id: UUID
+    budget_id: UUID
+    category_id: UUID
+    amount_cents: int
+    rollover_enabled: bool | None
+    sort_order: int
+
+    model_config = {"from_attributes": True}
+
+
+class BudgetOut(BaseModel):
+    id: UUID
+    name: str
+    period_type: str
+    is_active: bool
+    rollover_enabled: bool
+    global_limit_cents: int | None
+    income_basis: IncomeBasis
+    fixed_income_cents: int | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class CategoryProgressOut(BaseModel):
+    category_id: UUID
+    category_name: str
+    budgeted_cents: int
+    rollover_in_cents: int
+    spent_cents: int
+    available_cents: int
+    percent_consumed: int
+    projected_cents: int
+    suggested_daily_pace_cents: int
+
+
+class UnbudgetedCategoryOut(BaseModel):
+    category_id: UUID
+    category_name: str
+    spent_cents: int
+
+
+class BudgetCurrentOut(BaseModel):
+    month: str
+    is_closed: bool
+    expected_income_cents: int | None
+    total_budgeted_cents: int
+    total_spent_cents: int
+    total_available_cents: int
+    global_limit_cents: int | None
+    global_projected_cents: int
+    items: list[CategoryProgressOut]
+    unbudgeted: list[UnbudgetedCategoryOut]
+
+
+class ClosePeriodResult(BaseModel):
+    month: str
+    items: list[CategoryProgressOut]
+
+
+class BudgetHistoryPeriodOut(BaseModel):
+    month: str
+    closed_at: datetime
+    items: list[CategoryProgressOut]
+
+
+class BudgetHistoryOut(BaseModel):
+    periods: list[BudgetHistoryPeriodOut]

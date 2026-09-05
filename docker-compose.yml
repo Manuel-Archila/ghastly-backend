@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ghastly
+      POSTGRES_PASSWORD: ghastly
+      POSTGRES_DB: ghastly
+    ports:
+      # 5432 host ya está ocupado por otro proyecto local (smartgrp-backend-db-1).
+      - "5433:5432"
+    volumes:
+      - ghastly_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ghastly"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  ghastly_postgres_data:
