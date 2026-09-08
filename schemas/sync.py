@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-EntityType = Literal["account", "category", "transaction"]
+EntityType = Literal["account", "category", "transaction", "budget", "budget_item"]
 Op = Literal["upsert", "delete"]
 
 

@@ -23,11 +23,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.errors import AppError, NotFoundError
 from schemas.accounts import AccountCreate, AccountOut, AccountUpdate
+from schemas.budgets import (
+    BudgetCreate,
+    BudgetItemCreate,
+    BudgetItemUpdate,
+    BudgetOut,
+    BudgetUpdate,
+)
 from schemas.categories import CategoryCreate, CategoryOut, CategoryUpdate
 from schemas.sync import SyncChangeOut, SyncConflictOut, SyncMutationIn, SyncPullOut, SyncPushResult
 from schemas.transactions import TransactionCreate, TransactionOut
-from services import account_service, category_service, transaction_service
+from services import account_service, budget_service, category_service, transaction_service
 from storage.models.auth import Device
+from storage.models.budget import BudgetItem
 from storage.models.sync import ChangeLog
 from storage.models.sync_mutation import ProcessedMutation
 
@@ -203,10 +211,75 @@ async def _apply_transaction(
     return True, None, None
 
 
+BUDGET_EDITABLE_FIELDS = {
+    "name",
+    "is_active",
+    "rollover_enabled",
+    "global_limit_cents",
+    "income_basis",
+    "fixed_income_cents",
+}
+BUDGET_ITEM_EDITABLE_FIELDS = {"amount_cents", "rollover_enabled", "sort_order"}
+
+
+async def _apply_budget(
+    db: AsyncSession, user_id: UUID, mutation: SyncMutationIn
+) -> _MutationOutcome:
+    try:
+        budget = await budget_service.get_budget(db, user_id, mutation.entity_id)
+    except NotFoundError:
+        budget = None
+
+    if mutation.op == "delete":
+        if budget is None or budget.deleted_at is not None:
+            return True, None, None
+        await budget_service.delete_budget(db, user_id, mutation.entity_id)
+        return True, None, None
+
+    if budget is None:
+        data = BudgetCreate.model_validate(
+            {**mutation.payload, "id": mutation.entity_id, "items": []}
+        )
+        await budget_service.create_budget(db, user_id, data)
+        return True, None, None
+
+    if mutation.client_updated_at <= budget.updated_at:
+        return False, "STALE_UPDATE", BudgetOut.model_validate(budget).model_dump(mode="json")
+
+    filtered = {k: v for k, v in mutation.payload.items() if k in BUDGET_EDITABLE_FIELDS}
+    await budget_service.update_budget(db, user_id, mutation.entity_id, BudgetUpdate(**filtered))
+    return True, None, None
+
+
+async def _apply_budget_item(
+    db: AsyncSession, user_id: UUID, mutation: SyncMutationIn
+) -> _MutationOutcome:
+    budget_id = mutation.payload.get("budget_id")
+    if budget_id is None:
+        return False, "BUDGET_ITEM_MISSING_BUDGET_ID", None
+
+    existing = await db.get(BudgetItem, mutation.entity_id)
+    if existing is None:
+        data = BudgetItemCreate.model_validate({**mutation.payload, "id": mutation.entity_id})
+        await budget_service.add_item(db, user_id, UUID(str(budget_id)), data)
+        return True, None, None
+
+    if existing.user_id != user_id:
+        return False, "BUDGET_ITEM_OWNED_BY_OTHER", None
+
+    filtered = {k: v for k, v in mutation.payload.items() if k in BUDGET_ITEM_EDITABLE_FIELDS}
+    await budget_service.update_item(
+        db, user_id, existing.budget_id, mutation.entity_id, BudgetItemUpdate(**filtered)
+    )
+    return True, None, None
+
+
 _APPLIERS = {
     "account": _apply_account,
     "category": _apply_category,
     "transaction": _apply_transaction,
+    "budget": _apply_budget,
+    "budget_item": _apply_budget_item,
 }
 
 

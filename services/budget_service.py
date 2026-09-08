@@ -14,7 +14,7 @@ import calendar
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -282,15 +282,27 @@ async def _compute_expected_income(
 # ---------------------------------------------------------------------------
 # Cálculo de consumo por categoría (vivo, para un mes abierto)
 
+# Un reembolso (caso de negocio 5) es una transacción `income` con
+# `refund_of_id`: RESTA del gasto de su categoría original, nunca suma a
+# ingresos. Todo cálculo de consumo suma gastos y resta reembolsos.
+_spend_or_refund = or_(
+    Transaction.kind == "expense",
+    Transaction.refund_of_id.is_not(None),
+)
+_signed_spend = case(
+    (Transaction.refund_of_id.is_not(None), -Transaction.amount_cents),
+    else_=Transaction.amount_cents,
+)
+
 
 async def _spent_for_category(
     db: AsyncSession, user_id: UUID, category_id: UUID, period_start: date, period_end: date
 ) -> int:
     stmt = exclude_transfers(
-        select(func.coalesce(func.sum(Transaction.amount_cents), 0)).where(
+        select(func.coalesce(func.sum(_signed_spend), 0)).where(
             Transaction.user_id == user_id,
             Transaction.category_id == category_id,
-            Transaction.kind == "expense",
+            _spend_or_refund,
             Transaction.deleted_at.is_(None),
             Transaction.date >= period_start,
             Transaction.date <= period_end,
@@ -443,9 +455,9 @@ async def get_current(
     )
 
     total_spent_stmt = exclude_transfers(
-        select(func.coalesce(func.sum(Transaction.amount_cents), 0)).where(
+        select(func.coalesce(func.sum(_signed_spend), 0)).where(
             Transaction.user_id == user_id,
-            Transaction.kind == "expense",
+            _spend_or_refund,
             Transaction.deleted_at.is_(None),
             Transaction.date >= period_start,
             Transaction.date <= period_end,
@@ -455,10 +467,10 @@ async def get_current(
 
     budgeted_category_ids = {item.category_id for item in items}
     unbudgeted_stmt = exclude_transfers(
-        select(Transaction.category_id, func.sum(Transaction.amount_cents))
+        select(Transaction.category_id, func.sum(_signed_spend))
         .where(
             Transaction.user_id == user_id,
-            Transaction.kind == "expense",
+            _spend_or_refund,
             Transaction.deleted_at.is_(None),
             Transaction.category_id.is_not(None),
             Transaction.date >= period_start,
@@ -469,7 +481,7 @@ async def get_current(
     unbudgeted_rows = (await db.execute(unbudgeted_stmt)).all()
     unbudgeted: list[UnbudgetedCategoryOut] = []
     for category_id, spent in unbudgeted_rows:
-        if category_id in budgeted_category_ids:
+        if category_id in budgeted_category_ids or spent <= 0:
             continue
         category = await db.get(Category, category_id)
         unbudgeted.append(

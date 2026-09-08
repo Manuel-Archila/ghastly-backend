@@ -230,3 +230,48 @@ async def test_transfer_creation_not_supported_via_push(client: AsyncClient) -> 
     assert (
         response.json()["data"]["conflicts"][0]["reason"] == "TRANSFER_NOT_SUPPORTED_VIA_SYNC_PUSH"
     )
+
+
+async def test_push_creates_budget_and_item_offline(client: AsyncClient) -> None:
+    headers, device_id = await register_and_login_with_device(client)
+    category_id = await create_category(client, headers, name="Alimentación")
+    budget_id = str(uuid.uuid4())
+    item_id = str(uuid.uuid4())
+    now = datetime.now(UTC).isoformat()
+
+    response = await client.post(
+        "/v1/sync/push",
+        json={
+            "device_id": str(device_id),
+            "mutations": [
+                {
+                    "client_mutation_id": str(uuid.uuid4()),
+                    "entity_type": "budget",
+                    "entity_id": budget_id,
+                    "op": "upsert",
+                    "payload": {"id": budget_id, "name": "Septiembre"},
+                    "client_updated_at": now,
+                },
+                {
+                    "client_mutation_id": str(uuid.uuid4()),
+                    "entity_type": "budget_item",
+                    "entity_id": item_id,
+                    "op": "upsert",
+                    "payload": {
+                        "id": item_id,
+                        "budget_id": budget_id,
+                        "category_id": str(category_id),
+                        "amount_cents": 250_000,
+                    },
+                    "client_updated_at": now,
+                },
+            ],
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["conflicts"] == []
+
+    current = await client.get("/v1/budgets/current", headers=headers)
+    assert current.status_code == 200
+    assert current.json()["data"]["items"][0]["budgeted_cents"] == 250_000

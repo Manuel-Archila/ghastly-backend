@@ -14,11 +14,12 @@ async def _create_expense(
     category_id: uuid.UUID,
     amount_cents: int,
     date: str,
-) -> None:
+) -> uuid.UUID:
+    transaction_id = uuid.uuid4()
     response = await client.post(
         "/v1/transactions",
         json={
-            "id": str(uuid.uuid4()),
+            "id": str(transaction_id),
             "account_id": str(account_id),
             "category_id": str(category_id),
             "kind": "expense",
@@ -28,6 +29,7 @@ async def _create_expense(
         headers={**headers, "Idempotency-Key": str(uuid.uuid4())},
     )
     assert response.status_code == 200, response.text
+    return transaction_id
 
 
 def _current_month() -> str:
@@ -130,6 +132,42 @@ async def test_transfer_does_not_count_as_spend_in_budget(client: AsyncClient) -
     data = response.json()["data"]
     assert data["total_spent_cents"] == 0
     assert data["unbudgeted"] == []
+
+
+async def test_refund_subtracts_from_original_category_spend(client: AsyncClient) -> None:
+    """Caso 5: un reembolso resta del gasto de su categoría, no suma a ingresos."""
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=500_000)
+    category_id = await create_category(client, headers, name="Ropa")
+    await _create_budget(client, headers, category_id, 200_000)
+
+    expense_id = await _create_expense(
+        client,
+        headers,
+        account_id=account_id,
+        category_id=category_id,
+        amount_cents=150_000,
+        date=f"{_current_month()}-05",
+    )
+
+    refund = await client.post(
+        f"/v1/transactions/{expense_id}/refund",
+        json={
+            "original_id": str(expense_id),
+            "id": str(uuid.uuid4()),
+            "amount_cents": 40_000,
+            "date": f"{_current_month()}-08",
+        },
+        headers={**headers, "Idempotency-Key": str(uuid.uuid4())},
+    )
+    assert refund.status_code == 200, refund.text
+
+    response = await client.get("/v1/budgets/current", headers=headers)
+    data = response.json()["data"]
+    item = data["items"][0]
+    assert item["spent_cents"] == 110_000
+    assert item["available_cents"] == 90_000
+    assert data["total_spent_cents"] == 110_000
 
 
 async def test_no_active_budget_returns_404(client: AsyncClient) -> None:

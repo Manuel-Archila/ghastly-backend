@@ -12,7 +12,7 @@ Ghastly — API de finanzas personales (Guatemala, GTQ). Backend de la app móvi
 
 ## Estado actual
 
-**Fases 0-3 completas.** Fundaciones, núcleo transaccional (cuentas, categorías, transacciones, transferencias, reembolsos, sync), presupuestos, y los tres motores de Fase 3 (recurrentes/suscripciones, cuotas, deudas, metas) + jobs de APScheduler — todo implementado y probado (182 tests de dominio + API contra Postgres real). Los comandos de abajo ya funcionan tal cual. Sigue Fase 4 (reportes, anomalías, tasa de ahorro).
+**Fases 0-3 completas.** Fundaciones, núcleo transaccional (cuentas, categorías, transacciones, transferencias, reembolsos, sync), presupuestos, y los tres motores de Fase 3 (recurrentes/suscripciones, cuotas, deudas, metas) + jobs de APScheduler — todo implementado y probado (184 tests de dominio + API contra Postgres real). `/sync/push` maneja `account`, `category`, `transaction`, `budget`, `budget_item`. El consumo de presupuesto (`budget_service`) resta los reembolsos de su categoría original — caso 5 — tanto en el mes vivo como en el gasto congelado al cerrar el período. Los comandos de abajo ya funcionan tal cual. Sigue Fase 4 (reportes, anomalías, tasa de ahorro).
 
 Pendientes conocidos de Fase 3: entrega push real (los jobs de aviso dejan rastro en logs, no envían), el gancho de `check_budget_alerts` "tras cada escritura", `detect_anomalies` (es Fase 4), y `refresh_fx_rates` (no-op hasta decidir fuente de tasas).
 
@@ -24,7 +24,7 @@ Pendientes conocidos de Fase 3: entrega push real (los jobs de aviso dejan rastr
 uv sync --extra dev              # instalar dependencias
 docker compose up -d postgres    # DB local
 pyway migrate                    # aplicar migraciones
-uv run fastapi dev main.py       # servidor con reload → http://localhost:8000/docs
+uv run fastapi dev main.py --host 0.0.0.0 --port 8011   # servidor con reload → http://localhost:8011/docs (LAN para el teléfono)
 
 uv run pytest                    # todos los tests
 uv run pytest tests/domain -q    # solo dominio (rápido, sin DB) — el ciclo normal
