@@ -16,7 +16,9 @@ Ghastly — API de finanzas personales (Guatemala, GTQ). Backend de la app móvi
 
 `/reports/*`: `dashboard` (patrimonio neto, flujo del mes, top 5 categorías, presupuesto global, próximos vencimientos, pasivo en cuotas; "por cobrar" es un stub `null` hasta Fase 5), `by-category` (desglose de gasto o ingreso por categoría en cualquier rango, para la dona), `cashflow` (serie de ingreso/gasto por mes o semana, sin huecos), `expected-income` (las dos bases del caso 7 — mes anterior y promedio 3m — vía `budget_service.income_for_month`, público), `net-worth` (patrimonio neto histórico, reconstruido mes a mes con `domain.balances.compute_balance_series` sobre el ledger completo de cada cuenta y deuda — no un snapshot guardado), `trends` (misma serie de cashflow por mes + los dos promedios de ingreso del caso 12, con y sin extraordinarios), `comparison` (ingreso/gasto y desglose por categoría de dos meses `?a=&b=`), `anomalies` (gasto por categoría del mes contra el promedio de los 3 anteriores, umbral +30% sobre una base mínima de Q50 — `domain/anomalies.py`), `savings-rate` (% de ingreso no gastado por mes, reusa `cashflow`) y `upcoming` (calendario completo de cuotas + recurrentes + corte/pago de tarjeta + pago mensual de deudas activas, sin el recorte de 5 del dashboard).
 
-Pendientes conocidos: entrega push real (los jobs de aviso dejan rastro en logs, no envían), el gancho de `check_budget_alerts` "tras cada escritura", el job programado `detect_anomalies` (el endpoint on-demand ya existe; falta registrarlo en `jobs/scheduler.py` para avisos proactivos), y `refresh_fx_rates` (no-op hasta decidir fuente de tasas).
+El job `detect_anomalies` (día 1, 06:00) ya corre para todos los usuarios contra el mes que acaba de cerrar, reusando `report_service.get_anomalies` — deja el rastro en logs (`category_id`, `month`, `percent_increase`; nunca montos) igual que los demás avisos.
+
+Pendientes conocidos: entrega push real (los jobs de aviso dejan rastro en logs, no envían), el gancho de `check_budget_alerts` "tras cada escritura", y `refresh_fx_rates` (no-op hasta decidir fuente de tasas).
 
 ---
 

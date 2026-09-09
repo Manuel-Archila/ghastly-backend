@@ -13,6 +13,7 @@ from jobs import (
     card_cycle_notices,
     check_budget_alerts,
     close_budget_periods,
+    detect_anomalies,
     generate_recurring,
     purge_idempotency_keys,
     refresh_fx_rates,
@@ -42,6 +43,11 @@ def get_scheduler() -> AsyncIOScheduler:
         )
         scheduler.add_job(
             card_cycle_notices.run, CronTrigger(hour=6, minute=0), id="card_cycle_notices"
+        )
+        scheduler.add_job(
+            detect_anomalies.run,
+            CronTrigger(day=1, hour=6, minute=0),
+            id="detect_anomalies",
         )
         scheduler.add_job(
             purge_idempotency_keys.run, CronTrigger(minute=0), id="purge_idempotency_keys"
