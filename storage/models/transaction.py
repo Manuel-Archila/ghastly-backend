@@ -46,6 +46,9 @@ class Transaction(Base):
     recurring_rule_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("recurring_rules.id")
     )
+    receivable_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("receivables.id")
+    )
 
     is_reconciled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     is_tax_relevant: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
