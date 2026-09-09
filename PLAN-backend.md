@@ -502,7 +502,12 @@ Cada fase termina con la API desplegable y con la app funcionando contra ella.
 
 ## 14. Preguntas abiertas
 
-- ¿Dónde se despliega? (Fly.io / Railway / AWS ECS — condiciona el Dockerfile y los jobs)
 - ¿Push notifications con Expo Push o APNs/FCM directo?
 - ¿Fuente de tasas de cambio, o solo carga manual?
 - ¿Se arranca con histórico o desde cero? (define si hay que priorizar la importación de CSV)
+
+### Decididas (2026-09-09)
+
+- **Dónde se despliega:** todavía no decidido, y no bloquea nada — el `Dockerfile` ya es genérico y todas las credenciales (DB, S3) viajan por variables de entorno, así que funciona igual en Fly.io, Railway, un VPS o lo que se elija después.
+- **Almacenamiento de objetos (recibos en S3, archivos de `/export`):** **Cloudflare R2**. Es compatible con la API de S3 (mismo `boto3`, solo cambia `endpoint_url` a la URL de la cuenta de R2) y no cobra por egreso. `config.py` guarda `s3_endpoint_url` además de las credenciales — si algún día se migra a AWS S3 real, alcanza con vaciar esa variable.
+- **Backup cifrado (`POST /backup` / `POST /restore`):** el cliente reenvía la contraseña de login en el body de la petición (viaja por HTTPS, igual que en `/auth/login`). El servidor la usa un instante para derivar una clave de cifrado con Argon2id + un salt propio del backup (mismo mecanismo que ya protege las contraseñas guardadas), cifra o descifra, y **descarta la clave sin persistirla en ningún lado** — ni la clave derivada ni la contraseña quedan en la base de datos. Trade-off aceptado: si el usuario cambia su contraseña, un backup viejo cifrado con la contraseña anterior deja de poder restaurarse con la nueva (tendría que recordar cuál usó).

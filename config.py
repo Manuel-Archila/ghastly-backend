@@ -28,10 +28,15 @@ class Settings(BaseSettings):
     # Zona de negocio: la define el servidor, no el dispositivo (CLAUDE.md).
     business_timezone: str = "America/Guatemala"
 
-    # Fase 5 — recibos en S3. Vacío hasta entonces.
+    # Fase 5 — recibos y /export en almacenamiento de objetos. Vacío hasta
+    # entonces. Proveedor: Cloudflare R2 (compatible con la API de S3, sin
+    # costo de egreso) — mismo boto3 que AWS S3, solo cambia s3_endpoint_url
+    # a la URL de cuenta de R2 y aws_region a "auto". Si algún día se migra
+    # a AWS S3 real, alcanza con vaciar s3_endpoint_url.
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
     aws_region: str | None = None
+    s3_endpoint_url: str | None = None
     s3_bucket_receipts: str | None = None
 
     @property
