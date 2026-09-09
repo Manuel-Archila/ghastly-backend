@@ -26,6 +26,10 @@ class TransactionCreate(BaseModel):
     is_tax_relevant: bool = False
     is_extraordinary: bool = False
     tags: list[str] = Field(default_factory=list)
+    # Si viene, es una plantilla propia (transaction_templates) que se marca
+    # usada — no se persiste en la transacción, es solo la señal para
+    # incrementar use_count/last_used_at (PLAN-backend.md §8).
+    template_id: UUID | None = None
 
 
 class TransactionUpdate(BaseModel):

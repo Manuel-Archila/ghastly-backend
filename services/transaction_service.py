@@ -35,7 +35,7 @@ from schemas.transactions import (
     TransactionStats,
     TransferCreate,
 )
-from services import budget_service
+from services import budget_service, transaction_template_service
 from services.change_log import record_change
 from services.query_filters import exclude_transfers
 from storage.models.account import Account
@@ -217,6 +217,9 @@ async def create_transaction(
     )
 
     await _check_budget_alert(db, user_id, transaction)
+
+    if data.template_id is not None:
+        await transaction_template_service.mark_used(db, user_id, data.template_id)
 
     return TransactionCreateResult(
         transaction=TransactionOut.model_validate(transaction), warning=warning
