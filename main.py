@@ -24,6 +24,7 @@ from routers import (
     goals,
     health,
     installments,
+    receivables,
     recurring,
     reports,
     sync,
@@ -79,6 +80,7 @@ def create_app() -> FastAPI:
     app.include_router(recurring.subscriptions_router)
     app.include_router(debts.router)
     app.include_router(goals.router)
+    app.include_router(receivables.router)
 
     return app
 
