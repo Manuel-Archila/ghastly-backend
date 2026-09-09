@@ -1,6 +1,7 @@
 import uuid
 from datetime import UTC, datetime
 
+import pytest
 from httpx import AsyncClient
 
 from tests.api.helpers import create_account, create_category, register_and_login
@@ -241,3 +242,106 @@ async def test_close_period_freezes_and_rejects_double_close(client: AsyncClient
 
     history = await client.get(f"/v1/budgets/{budget_id}/history", headers=headers)
     assert len(history.json()["data"]["periods"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Gancho "tras cada escritura" (PLAN-backend.md §9): budget_service.check_alerts_for_category,
+# llamado desde transaction_service al crear/editar/restaurar un gasto. Sin
+# entrega push todavía (CLAUDE.md): el efecto observable es una línea de log.
+
+
+async def test_creating_expense_over_threshold_logs_budget_alert(
+    client: AsyncClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
+    category_id = await create_category(client, headers, name="Alimentación")
+    await _create_budget(client, headers, category_id, 100_000)
+
+    await _create_expense(
+        client,
+        headers,
+        account_id=account_id,
+        category_id=category_id,
+        amount_cents=90_000,  # 90% del presupuesto
+        date=f"{_current_month()}-05",
+    )
+
+    output = capsys.readouterr().out
+    assert "budget_alert" in output
+    assert str(category_id) in output
+
+
+async def test_creating_expense_under_threshold_does_not_log_alert(
+    client: AsyncClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
+    category_id = await create_category(client, headers, name="Alimentación")
+    await _create_budget(client, headers, category_id, 100_000)
+
+    await _create_expense(
+        client,
+        headers,
+        account_id=account_id,
+        category_id=category_id,
+        amount_cents=50_000,  # 50% del presupuesto
+        date=f"{_current_month()}-05",
+    )
+
+    output = capsys.readouterr().out
+    assert "budget_alert" not in output
+
+
+async def test_updating_expense_category_across_threshold_logs_budget_alert(
+    client: AsyncClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`amount_cents` no es editable vía PATCH; `category_id` sí — mover un
+    gasto grande hacia una categoría presupuestada es la forma real de
+    cruzar el umbral con una edición."""
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
+    other_category = await create_category(client, headers, name="Otra")
+    budgeted_category = await create_category(client, headers, name="Alimentación")
+    await _create_budget(client, headers, budgeted_category, 100_000)
+
+    transaction_id = await _create_expense(
+        client,
+        headers,
+        account_id=account_id,
+        category_id=other_category,
+        amount_cents=95_000,
+        date=f"{_current_month()}-05",
+    )
+    capsys.readouterr()  # descarta cualquier log de la creación (categoría sin presupuesto)
+
+    response = await client.patch(
+        f"/v1/transactions/{transaction_id}",
+        json={"category_id": str(budgeted_category)},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+
+    output = capsys.readouterr().out
+    assert "budget_alert" in output
+    assert str(budgeted_category) in output
+
+
+async def test_expense_in_category_without_budget_does_not_log_alert(
+    client: AsyncClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
+    category_id = await create_category(client, headers, name="Sin presupuesto")
+
+    await _create_expense(
+        client,
+        headers,
+        account_id=account_id,
+        category_id=category_id,
+        amount_cents=500_000,
+        date=f"{_current_month()}-05",
+    )
+
+    output = capsys.readouterr().out
+    assert "budget_alert" not in output

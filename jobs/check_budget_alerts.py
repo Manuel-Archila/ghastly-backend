@@ -1,9 +1,10 @@
 """Job de las 20:00: alertas de presupuesto al 80%/100%.
 
-Solo la corrida programada está implementada acá. El gancho "tras cada
-escritura" (PLAN-backend §9 — revisar el instante en que una transacción
-cruza el umbral) requeriría engancharse a `transaction_service.create_transaction`
-y no se hizo en este pase; queda documentado como pendiente."""
+Complementa el gancho "tras cada escritura" (`budget_service.check_alerts_for_category`,
+llamado desde `transaction_service.create_transaction`/`update_transaction`):
+cubre los presupuestos que no tuvieron ningún movimiento ese día pero que
+igual siguen sobre el umbral (p. ej. si el usuario no registró nada hoy).
+"""
 
 from __future__ import annotations
 
@@ -11,12 +12,11 @@ import structlog
 from sqlalchemy import select
 
 from services import budget_service
+from services.budget_service import BUDGET_ALERT_THRESHOLDS
 from storage.db import get_session_factory
 from storage.models.budget import Budget
 
 logger = structlog.get_logger("jobs.check_budget_alerts")
-
-THRESHOLDS = (100, 80)  # se evalúa de mayor a menor; el primero que aplique gana
 
 
 async def run() -> None:
@@ -35,7 +35,9 @@ async def run() -> None:
             except Exception:
                 continue
             for item in current.items:
-                threshold = next((t for t in THRESHOLDS if item.percent_consumed >= t), None)
+                threshold = next(
+                    (t for t in BUDGET_ALERT_THRESHOLDS if item.percent_consumed >= t), None
+                )
                 if threshold is not None:
                     logger.info(
                         "budget_alert",

@@ -35,6 +35,7 @@ from schemas.transactions import (
     TransactionStats,
     TransferCreate,
 )
+from services import budget_service
 from services.change_log import record_change
 from services.query_filters import exclude_transfers
 from storage.models.account import Account
@@ -45,6 +46,18 @@ from storage.models.transaction import Transaction
 
 def _account_payload(account: Account) -> dict[str, Any]:
     return AccountOut.model_validate(account).model_dump(mode="json")
+
+
+async def _check_budget_alert(db: AsyncSession, user_id: UUID, transaction: Transaction) -> None:
+    """Gancho "tras cada escritura" (PLAN-backend.md §9): solo un gasto
+    categorizado puede empujar una categoría sobre el umbral 80%/100%, así
+    que es lo único que dispara la evaluación. Un reembolso RESTA del gasto
+    (caso de negocio 5) y nunca cruza un umbral hacia arriba, así que
+    `refund()` no llama esto."""
+    if transaction.kind != "expense" or transaction.category_id is None:
+        return
+    month = f"{transaction.date.year:04d}-{transaction.date.month:02d}"
+    await budget_service.check_alerts_for_category(db, user_id, transaction.category_id, month)
 
 
 DUPLICATE_WINDOW_MINUTES = 5
@@ -202,6 +215,8 @@ async def create_transaction(
         entity=account,
         payload=_account_payload(account),
     )
+
+    await _check_budget_alert(db, user_id, transaction)
 
     return TransactionCreateResult(
         transaction=TransactionOut.model_validate(transaction), warning=warning
@@ -438,6 +453,7 @@ async def update_transaction(
         entity=transaction,
         payload=TransactionOut.model_validate(transaction).model_dump(mode="json"),
     )
+    await _check_budget_alert(db, user_id, transaction)
     await db.commit()
     await db.refresh(transaction)
     return transaction
@@ -476,6 +492,7 @@ async def restore_transaction(db: AsyncSession, user_id: UUID, transaction_id: U
         entity=transaction,
         payload=TransactionOut.model_validate(transaction).model_dump(mode="json"),
     )
+    await _check_budget_alert(db, user_id, transaction)
     await db.commit()
     await db.refresh(transaction)
     return transaction

@@ -14,6 +14,7 @@ import calendar
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
+import structlog
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -507,6 +508,52 @@ async def get_current(
         items=progresses,
         unbudgeted=unbudgeted,
     )
+
+
+# ---------------------------------------------------------------------------
+# Alertas de presupuesto (umbral 80%/100%, PLAN-backend.md §9)
+#
+# `check_alerts_for_category` es el gancho "tras cada escritura": lo llama
+# `transaction_service` justo después de crear/editar un gasto, dentro de
+# la misma transacción de DB, así que ve el consumo ya actualizado sin
+# esperar a un commit. `jobs/check_budget_alerts.py` sigue corriendo a las
+# 20:00 para cubrir presupuestos sin movimiento ese día (el gancho no
+# reemplaza la corrida programada, la complementa). Ninguna de las dos
+# rutas persiste que ya se avisó — solo logs, igual que el resto de avisos
+# (CLAUDE.md: "Pendientes conocidos" — entrega push real es Fase 5) — así
+# que repetir el aviso en cada escritura mientras la categoría siga sobre
+# el umbral no rompe nada.
+
+# Se evalúa de mayor a menor; el primero que aplique gana.
+BUDGET_ALERT_THRESHOLDS = (100, 80)
+
+logger = structlog.get_logger("services.budget_service")
+
+
+async def check_alerts_for_category(
+    db: AsyncSession, user_id: UUID, category_id: UUID, month: str
+) -> None:
+    """No hace nada si el usuario no tiene presupuesto activo o la
+    categoría no está presupuestada ese mes — no es un error, es el caso
+    común de un gasto en una categoría sin límite."""
+    try:
+        current = await get_current(db, user_id, month)
+    except NotFoundError:
+        return
+
+    item = next((i for i in current.items if i.category_id == category_id), None)
+    if item is None:
+        return
+
+    threshold = next((t for t in BUDGET_ALERT_THRESHOLDS if item.percent_consumed >= t), None)
+    if threshold is not None:
+        logger.info(
+            "budget_alert",
+            user_id=str(user_id),
+            category_id=str(category_id),
+            percent_consumed=item.percent_consumed,
+            threshold=threshold,
+        )
 
 
 # ---------------------------------------------------------------------------
