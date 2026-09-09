@@ -12,6 +12,7 @@ from storage.models.recurring import RecurringRule
 from storage.models.sync import ChangeLog, IdempotencyKey
 from storage.models.sync_mutation import ProcessedMutation
 from storage.models.transaction import Transaction
+from storage.models.transaction_template import TransactionTemplate
 from storage.models.user import User
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "Goal",
     "GoalContribution",
     "Receivable",
+    "TransactionTemplate",
 ]
