@@ -14,6 +14,7 @@ son PASIVOS. Un gasto contra una tarjeta AUMENTA lo que se debe; un pago
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date as date_
 from typing import Literal
 
 AccountType = Literal[
@@ -82,6 +83,27 @@ def compute_balance(
     for entry in entries:
         balance += signed_delta(entry, account_type)
     return balance
+
+
+def compute_balance_series(
+    initial_balance_cents: int,
+    dated_entries: list[tuple[date_, LedgerEntry]],
+    account_type: AccountType,
+    as_of_dates: list[date_],
+) -> list[int]:
+    """El saldo de la cuenta al cierre de cada fecha en `as_of_dates` (ambas
+    listas ya ordenadas ascendente) — para `/reports/net-worth`. Una sola
+    pasada sobre el historial en vez de recalcular `compute_balance` desde
+    cero por cada punto de la serie."""
+    balances = []
+    index = 0
+    balance = initial_balance_cents
+    for as_of in as_of_dates:
+        while index < len(dated_entries) and dated_entries[index][0] <= as_of:
+            balance += signed_delta(dated_entries[index][1], account_type)
+            index += 1
+        balances.append(balance)
+    return balances
 
 
 def resolve_adjustment(diff_cents: int, account_type: AccountType) -> tuple[TransactionKind, int]:

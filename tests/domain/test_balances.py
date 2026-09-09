@@ -1,9 +1,12 @@
+from datetime import date
+
 import pytest
 
 from domain.balances import (
     BalanceError,
     LedgerEntry,
     compute_balance,
+    compute_balance_series,
     resolve_adjustment,
     signed_delta,
 )
@@ -88,6 +91,36 @@ def test_compute_balance_credit_card_purchase_then_payment() -> None:
     ]
     balance = compute_balance(0, entries, "credit_card")
     assert balance == 50_000  # queda debiendo Q500.00
+
+
+def test_compute_balance_series_returns_running_balance_at_each_point() -> None:
+    dated_entries = [
+        (date(2026, 7, 10), LedgerEntry(kind="income", amount_cents=300_000)),
+        (date(2026, 8, 5), LedgerEntry(kind="expense", amount_cents=100_000)),
+    ]
+    balances = compute_balance_series(
+        0, dated_entries, "checking", [date(2026, 7, 31), date(2026, 8, 31), date(2026, 9, 30)]
+    )
+    assert balances == [300_000, 200_000, 200_000]
+
+
+def test_compute_balance_series_ignores_entries_after_as_of() -> None:
+    dated_entries = [(date(2026, 9, 15), LedgerEntry(kind="income", amount_cents=100_000))]
+    balances = compute_balance_series(0, dated_entries, "checking", [date(2026, 8, 31)])
+    assert balances == [0]
+
+
+def test_compute_balance_series_no_entries_holds_initial_balance() -> None:
+    balances = compute_balance_series(
+        50_000, [], "checking", [date(2026, 7, 31), date(2026, 8, 31)]
+    )
+    assert balances == [50_000, 50_000]
+
+
+def test_compute_balance_series_entry_exactly_on_as_of_date_is_included() -> None:
+    dated_entries = [(date(2026, 8, 31), LedgerEntry(kind="income", amount_cents=100_000))]
+    balances = compute_balance_series(0, dated_entries, "checking", [date(2026, 8, 31)])
+    assert balances == [100_000]
 
 
 def test_compute_balance_starts_from_initial_balance() -> None:

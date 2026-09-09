@@ -20,3 +20,15 @@ def add_months_clamped(start: date, months: int) -> date:
     year = start.year + month_index // 12
     month = month_index % 12 + 1
     return clamp_day(year, month, start.day)
+
+
+def next_day_of_month(reference: date, day: int, *, inclusive: bool) -> date:
+    """La próxima vez que cae el día `day` del mes a partir de `reference`
+    (hoy mismo si `inclusive` y hoy es ese día). Compartido por el ciclo de
+    tarjeta (`domain/credit_cycle.py`) y el vencimiento mensual de deudas
+    sin fecha de corte propia (`domain/reports.py`)."""
+    candidate = clamp_day(reference.year, reference.month, day)
+    if candidate > reference or (inclusive and candidate == reference):
+        return candidate
+    next_month = add_months_clamped(reference.replace(day=1), 1)
+    return clamp_day(next_month.year, next_month.month, day)
