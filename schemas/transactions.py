@@ -86,6 +86,8 @@ class TransactionOut(BaseModel):
     refund_of_id: UUID | None
     installment_id: UUID | None = None
     recurring_rule_id: UUID | None = None
+    receivable_id: UUID | None = None
+    receipt_key: str | None = None
     is_reconciled: bool
     is_tax_relevant: bool
     is_extraordinary: bool

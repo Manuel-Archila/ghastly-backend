@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.idempotency import IDEMPOTENCY_KEY_HEADER, handle_idempotent_write
 from core.response import ApiResponse, ok
 from dependencies import get_current_user, get_db
+from schemas.receipts import ReceiptDownloadOut, ReceiptUploadOut, ReceiptUploadRequest
 from schemas.transactions import (
     BulkCategorizeRequest,
     RefundCreate,
@@ -22,7 +23,7 @@ from schemas.transactions import (
     TransactionUpdate,
     TransferCreate,
 )
-from services import transaction_service
+from services import receipt_service, transaction_service
 from storage.models.user import User
 
 router = APIRouter(prefix="/v1/transactions", tags=["transactions"])
@@ -219,3 +220,26 @@ async def refund_transaction(
         perform=_perform,
         message="Reembolso creado.",
     )
+
+
+@router.post("/{transaction_id}/receipt")
+async def request_receipt_upload(
+    transaction_id: UUID,
+    payload: ReceiptUploadRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiResponse[ReceiptUploadOut]:
+    result = await receipt_service.request_upload(
+        db, current_user.id, transaction_id, payload.content_type
+    )
+    return ok(result, "URL de subida generada.")
+
+
+@router.get("/{transaction_id}/receipt")
+async def get_receipt_download_url(
+    transaction_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiResponse[ReceiptDownloadOut]:
+    result = await receipt_service.get_download_url(db, current_user.id, transaction_id)
+    return ok(result)
