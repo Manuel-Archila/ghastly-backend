@@ -1,8 +1,33 @@
 import uuid
+from datetime import UTC, datetime
 
 from httpx import AsyncClient
 
+from domain.dates import add_months_clamped
 from tests.api.helpers import create_account, register_and_login
+
+
+async def _create_expense(
+    client: AsyncClient,
+    headers: dict[str, str],
+    account_id: uuid.UUID,
+    amount_cents: int,
+    date: str,
+) -> uuid.UUID:
+    transaction_id = uuid.uuid4()
+    response = await client.post(
+        "/v1/transactions",
+        json={
+            "id": str(transaction_id),
+            "account_id": str(account_id),
+            "kind": "expense",
+            "amount_cents": amount_cents,
+            "date": date,
+        },
+        headers={**headers, "Idempotency-Key": str(uuid.uuid4())},
+    )
+    assert response.status_code == 200, response.text
+    return transaction_id
 
 
 async def test_create_and_get_account(client: AsyncClient) -> None:
@@ -126,3 +151,135 @@ async def test_recalculate_matches_incremental_balance(client: AsyncClient) -> N
         == before.json()["data"]["current_balance_cents"]
         == 700
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /accounts/{id}/statement
+
+
+async def test_statement_current_cycle_computes_spend_dates_and_balance(
+    client: AsyncClient,
+) -> None:
+    headers = await register_and_login(client)
+    today = datetime.now(UTC).date()
+    one_month_ago = add_months_clamped(today, -1)
+    account_id = await create_account(
+        client,
+        headers,
+        account_type="credit_card",
+        statement_day=today.day,
+        payment_due_day=today.day,
+    )
+    await _create_expense(client, headers, account_id, 50_000, today.isoformat())
+    await _create_expense(client, headers, account_id, 30_000, one_month_ago.isoformat())
+
+    response = await client.get(f"/v1/accounts/{account_id}/statement", headers=headers)
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["cycle"] == "current"
+    assert data["statement_date"] == today.isoformat()
+    assert data["spend_cents"] == 50_000  # el gasto de hace un mes no entra en este corte
+    assert data["balance_cents"] == 80_000  # pero sí en el saldo acumulado
+    assert data["minimum_cents"] is None
+
+
+async def test_statement_previous_cycle_and_specific_month_agree(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    today = datetime.now(UTC).date()
+    one_month_ago = add_months_clamped(today, -1)
+    account_id = await create_account(
+        client,
+        headers,
+        account_type="credit_card",
+        statement_day=today.day,
+        payment_due_day=today.day,
+    )
+    await _create_expense(client, headers, account_id, 30_000, one_month_ago.isoformat())
+
+    previous = await client.get(
+        f"/v1/accounts/{account_id}/statement?cycle=previous", headers=headers
+    )
+    assert previous.status_code == 200, previous.text
+    previous_data = previous.json()["data"]
+    assert previous_data["cycle"] == "previous"
+    assert previous_data["statement_date"] == one_month_ago.isoformat()
+    assert previous_data["spend_cents"] == 30_000
+
+    specific = await client.get(
+        f"/v1/accounts/{account_id}/statement?cycle={one_month_ago.year:04d}-{one_month_ago.month:02d}",
+        headers=headers,
+    )
+    assert specific.json()["data"]["statement_date"] == previous_data["statement_date"]
+    assert specific.json()["data"]["spend_cents"] == 30_000
+
+
+async def test_statement_computes_minimum_from_configured_percent(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    today = datetime.now(UTC).date()
+    account_id = await create_account(
+        client,
+        headers,
+        account_type="credit_card",
+        statement_day=today.day,
+        payment_due_day=today.day,
+        minimum_payment_percent="5.00",
+    )
+    await _create_expense(client, headers, account_id, 100_000, today.isoformat())
+
+    response = await client.get(f"/v1/accounts/{account_id}/statement", headers=headers)
+    assert response.json()["data"]["minimum_cents"] == 5_000
+
+
+async def test_statement_rejects_non_credit_card_account(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, account_type="checking")
+
+    response = await client.get(f"/v1/accounts/{account_id}/statement", headers=headers)
+    assert response.status_code == 422
+    assert response.json()["data"]["code"] == "ACCOUNT_NOT_CREDIT_CARD"
+
+
+async def test_statement_rejects_credit_card_without_cycle_configured(
+    client: AsyncClient,
+) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, account_type="credit_card")
+
+    response = await client.get(f"/v1/accounts/{account_id}/statement", headers=headers)
+    assert response.status_code == 422
+    assert response.json()["data"]["code"] == "ACCOUNT_CYCLE_NOT_CONFIGURED"
+
+
+async def test_statement_rejects_invalid_cycle_param(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    today = datetime.now(UTC).date()
+    account_id = await create_account(
+        client,
+        headers,
+        account_type="credit_card",
+        statement_day=today.day,
+        payment_due_day=today.day,
+    )
+
+    response = await client.get(
+        f"/v1/accounts/{account_id}/statement?cycle=garbage", headers=headers
+    )
+    assert response.status_code == 422
+    assert response.json()["data"]["code"] == "INVALID_CYCLE"
+
+
+async def test_cross_user_cannot_read_statement(client: AsyncClient) -> None:
+    headers_a = await register_and_login(client, "statement-a@example.com")
+    headers_b = await register_and_login(client, "statement-b@example.com")
+    today = datetime.now(UTC).date()
+    account_id = await create_account(
+        client,
+        headers_a,
+        account_type="credit_card",
+        statement_day=today.day,
+        payment_due_day=today.day,
+    )
+
+    response = await client.get(f"/v1/accounts/{account_id}/statement", headers=headers_b)
+    assert response.status_code == 404
+    assert response.json()["data"]["code"] == "ACCOUNT_NOT_FOUND"

@@ -7,7 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.response import ApiResponse, ok
 from dependencies import get_current_user, get_db
-from schemas.accounts import AccountAdjustRequest, AccountCreate, AccountOut, AccountUpdate
+from schemas.accounts import (
+    AccountAdjustRequest,
+    AccountCreate,
+    AccountOut,
+    AccountStatementOut,
+    AccountUpdate,
+)
 from schemas.common import ReorderRequest
 from schemas.transactions import TransactionOut
 from services import account_service
@@ -101,3 +107,14 @@ async def adjust_account(
 ) -> ApiResponse[TransactionOut]:
     transaction = await account_service.adjust_account(db, current_user.id, account_id, payload)
     return ok(TransactionOut.model_validate(transaction), "Saldo ajustado.")
+
+
+@router.get("/{account_id}/statement")
+async def get_statement(
+    account_id: UUID,
+    cycle: str = "current",
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiResponse[AccountStatementOut]:
+    result = await account_service.get_statement(db, current_user.id, account_id, cycle)
+    return ok(result)

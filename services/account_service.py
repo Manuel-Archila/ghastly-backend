@@ -4,16 +4,26 @@ decide en el dominio; este service solo junta filas y llama a `record_change`.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.errors import ConflictError, NotFoundError, ValidationAppError
+from core.timezone import today_in_business_tz
 from domain.balances import LedgerEntry, compute_balance, resolve_adjustment
-from schemas.accounts import AccountAdjustRequest, AccountCreate, AccountOut, AccountUpdate
+from domain.credit_cycle import compute_current_cycle, compute_cycle_for_statement_month
+from domain.dates import add_months_clamped
+from schemas.accounts import (
+    AccountAdjustRequest,
+    AccountCreate,
+    AccountOut,
+    AccountStatementOut,
+    AccountUpdate,
+)
 from services.change_log import record_change
 from services.reserved_categories import get_or_create_adjustment_category
 from storage.models.account import Account
@@ -38,6 +48,7 @@ async def create_account(db: AsyncSession, user_id: UUID, data: AccountCreate) -
         statement_day=data.statement_day,
         payment_due_day=data.payment_due_day,
         interest_rate=data.interest_rate,
+        minimum_payment_percent=data.minimum_payment_percent,
     )
     db.add(account)
     try:
@@ -221,3 +232,119 @@ async def reorder_accounts(db: AsyncSession, user_id: UUID, ids: list[UUID]) -> 
         account.sort_order = position
         account.updated_at = datetime.now(UTC)
     await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# GET /accounts/{id}/statement (PLAN-backend.md §8)
+#
+# Gasto neto del corte: mismo neteo de reembolsos que el resto del proyecto
+# (caso de negocio 5) — se duplica el patrón `_spend_or_refund`/
+# `_signed_spend` de report_service.py a propósito en vez de importarlo,
+# es privado de ese módulo.
+_spend_or_refund = or_(Transaction.kind == "expense", Transaction.refund_of_id.is_not(None))
+_signed_spend = case(
+    (Transaction.refund_of_id.is_not(None), -Transaction.amount_cents),
+    else_=Transaction.amount_cents,
+)
+
+
+async def _statement_spend_cents(
+    db: AsyncSession, account_id: UUID, period_start: date, period_end: date
+) -> int:
+    stmt = select(func.coalesce(func.sum(_signed_spend), 0)).where(
+        Transaction.account_id == account_id,
+        Transaction.deleted_at.is_(None),
+        Transaction.date >= period_start,
+        Transaction.date <= period_end,
+        _spend_or_refund,
+    )
+    return int((await db.execute(stmt)).scalar_one())
+
+
+async def _balance_as_of(db: AsyncSession, account: Account, as_of: date) -> int:
+    """Reconstruye el saldo de la cuenta a una fecha pasada — igual que
+    `recalculate_account`, pero cortando el ledger en `as_of` en vez de
+    tomarlo completo (`current_balance_cents` es de HOY, no sirve para un
+    corte anterior)."""
+    result = await db.execute(
+        select(Transaction)
+        .where(
+            Transaction.account_id == account.id,
+            Transaction.deleted_at.is_(None),
+            Transaction.date <= as_of,
+        )
+        .order_by(Transaction.date, Transaction.created_at)
+    )
+    entries = [
+        LedgerEntry(
+            kind=txn.kind,  # type: ignore[arg-type]
+            amount_cents=txn.amount_cents,
+            transfer_direction=txn.transfer_direction,  # type: ignore[arg-type]
+        )
+        for txn in result.scalars().all()
+    ]
+    return compute_balance(account.initial_balance_cents, entries, account.type)  # type: ignore[arg-type]
+
+
+async def get_statement(
+    db: AsyncSession, user_id: UUID, account_id: UUID, cycle: str
+) -> AccountStatementOut:
+    account = await get_account(db, user_id, account_id)
+    if account.type != "credit_card":
+        raise ValidationAppError(
+            "El estado de cuenta solo aplica a tarjetas de crédito.",
+            code="ACCOUNT_NOT_CREDIT_CARD",
+        )
+    if account.statement_day is None or account.payment_due_day is None:
+        raise ValidationAppError(
+            "La cuenta no tiene día de corte y de pago configurados.",
+            code="ACCOUNT_CYCLE_NOT_CONFIGURED",
+        )
+
+    today = today_in_business_tz()
+    current = compute_current_cycle(today, account.statement_day, account.payment_due_day)
+
+    if cycle == "current":
+        target = current
+    elif cycle == "previous":
+        anchor = add_months_clamped(current.statement_date.replace(day=1), -1)
+        target = compute_cycle_for_statement_month(
+            today, anchor.year, anchor.month, account.statement_day, account.payment_due_day
+        )
+    else:
+        try:
+            year_str, month_str = cycle.split("-")
+            year, month = int(year_str), int(month_str)
+        except ValueError as exc:
+            raise ValidationAppError(
+                "cycle debe ser 'current', 'previous' o 'YYYY-MM'.",
+                field="cycle",
+                code="INVALID_CYCLE",
+            ) from exc
+        target = compute_cycle_for_statement_month(
+            today, year, month, account.statement_day, account.payment_due_day
+        )
+
+    period_start = add_months_clamped(target.statement_date, -1) + timedelta(days=1)
+    period_end = target.statement_date
+
+    spend_cents = await _statement_spend_cents(db, account_id, period_start, period_end)
+    balance_cents = await _balance_as_of(db, account, target.statement_date)
+
+    minimum_cents = None
+    if account.minimum_payment_percent is not None:
+        raw = (Decimal(balance_cents) * account.minimum_payment_percent / Decimal(100)).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+        minimum_cents = max(0, int(raw))
+
+    return AccountStatementOut(
+        cycle=cycle,
+        period_start=period_start,
+        period_end=period_end,
+        statement_date=target.statement_date,
+        payment_due_date=target.payment_due_date,
+        spend_cents=spend_cents,
+        balance_cents=balance_cents,
+        minimum_cents=minimum_cents,
+    )

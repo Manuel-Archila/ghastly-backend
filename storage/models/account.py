@@ -48,6 +48,7 @@ class Account(Base):
     statement_day: Mapped[int | None] = mapped_column(SmallInteger)
     payment_due_day: Mapped[int | None] = mapped_column(SmallInteger)
     interest_rate: Mapped[Decimal | None] = mapped_column(Numeric(6, 4))
+    minimum_payment_percent: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     balance_recalculated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     created_at: Mapped[datetime] = mapped_column(

@@ -49,6 +49,7 @@ async def create_account(
     name: str = "Cuenta de prueba",
     statement_day: int | None = None,
     payment_due_day: int | None = None,
+    minimum_payment_percent: str | None = None,
 ) -> UUID:
     account_id = uuid4()
     payload: dict[str, Any] = {
@@ -62,6 +63,8 @@ async def create_account(
         payload["statement_day"] = statement_day
     if payment_due_day is not None:
         payload["payment_due_day"] = payment_due_day
+    if minimum_payment_percent is not None:
+        payload["minimum_payment_percent"] = minimum_payment_percent
     response = await client.post(
         "/v1/accounts",
         json=payload,

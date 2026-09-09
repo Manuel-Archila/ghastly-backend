@@ -50,6 +50,7 @@ ACCOUNT_EDITABLE_FIELDS = {
     "statement_day",
     "payment_due_day",
     "interest_rate",
+    "minimum_payment_percent",
 }
 CATEGORY_EDITABLE_FIELDS = {"name", "icon", "color", "is_tax_deductible", "sort_order"}
 TRANSACTION_EDITABLE_FIELDS = {

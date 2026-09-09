@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date as date_
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -29,6 +30,7 @@ class AccountCreate(BaseModel):
     statement_day: int | None = Field(default=None, ge=1, le=31)
     payment_due_day: int | None = Field(default=None, ge=1, le=31)
     interest_rate: Decimal | None = None
+    minimum_payment_percent: Decimal | None = Field(default=None, ge=0, le=100)
 
 
 class AccountUpdate(BaseModel):
@@ -42,6 +44,7 @@ class AccountUpdate(BaseModel):
     statement_day: int | None = Field(default=None, ge=1, le=31)
     payment_due_day: int | None = Field(default=None, ge=1, le=31)
     interest_rate: Decimal | None = None
+    minimum_payment_percent: Decimal | None = Field(default=None, ge=0, le=100)
 
 
 class AccountAdjustRequest(BaseModel):
@@ -66,8 +69,26 @@ class AccountOut(BaseModel):
     statement_day: int | None
     payment_due_day: int | None
     interest_rate: Decimal | None
+    minimum_payment_percent: Decimal | None
     balance_recalculated_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class AccountStatementOut(BaseModel):
+    cycle: str  # "current" | "previous" | "YYYY-MM", eco de lo pedido
+    period_start: date_
+    period_end: date_
+    statement_date: date_
+    payment_due_date: date_
+    # Gasto neto de la cuenta en el período del corte (ya resta reembolsos,
+    # caso de negocio 5; no incluye pagos a la tarjeta, son transferencias).
+    spend_cents: int
+    # Saldo (deuda) de la tarjeta al cierre del corte — reconstruido desde
+    # el ledger, no `current_balance_cents` (que es de HOY).
+    balance_cents: int
+    # null si la cuenta no tiene minimum_payment_percent configurado —
+    # no se inventa un % "típico", varía por banco.
+    minimum_cents: int | None

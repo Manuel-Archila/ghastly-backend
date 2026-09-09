@@ -1,6 +1,6 @@
 from datetime import date
 
-from domain.credit_cycle import compute_current_cycle
+from domain.credit_cycle import compute_current_cycle, compute_cycle_for_statement_month
 
 
 def test_statement_later_this_month() -> None:
@@ -39,4 +39,28 @@ def test_payment_due_before_statement_day_rolls_to_next_month() -> None:
 
 def test_statement_day_clamped_in_short_month() -> None:
     cycle = compute_current_cycle(date(2026, 2, 1), statement_day=31, payment_due_day=15)
+    assert cycle.statement_date == date(2026, 2, 28)
+
+
+def test_compute_cycle_for_statement_month_uses_the_requested_month() -> None:
+    cycle = compute_cycle_for_statement_month(
+        date(2026, 9, 25), year=2026, month=8, statement_day=18, payment_due_day=3
+    )
+    assert cycle.statement_date == date(2026, 8, 18)
+    assert cycle.payment_due_date == date(2026, 9, 3)
+
+
+def test_compute_cycle_for_statement_month_days_until_can_be_negative() -> None:
+    # El corte pedido ya pasó relativo a "hoy".
+    cycle = compute_cycle_for_statement_month(
+        date(2026, 9, 25), year=2026, month=8, statement_day=18, payment_due_day=3
+    )
+    assert cycle.days_until_statement == -38
+    assert cycle.days_until_payment_due == -22
+
+
+def test_compute_cycle_for_statement_month_clamps_short_month() -> None:
+    cycle = compute_cycle_for_statement_month(
+        date(2026, 3, 1), year=2026, month=2, statement_day=31, payment_due_day=15
+    )
     assert cycle.statement_date == date(2026, 2, 28)
