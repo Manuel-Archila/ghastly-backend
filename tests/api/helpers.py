@@ -47,17 +47,24 @@ async def create_account(
     initial_balance_cents: int = 0,
     currency: str = "GTQ",
     name: str = "Cuenta de prueba",
+    statement_day: int | None = None,
+    payment_due_day: int | None = None,
 ) -> UUID:
     account_id = uuid4()
+    payload: dict[str, Any] = {
+        "id": str(account_id),
+        "name": name,
+        "type": account_type,
+        "currency": currency,
+        "initial_balance_cents": initial_balance_cents,
+    }
+    if statement_day is not None:
+        payload["statement_day"] = statement_day
+    if payment_due_day is not None:
+        payload["payment_due_day"] = payment_due_day
     response = await client.post(
         "/v1/accounts",
-        json={
-            "id": str(account_id),
-            "name": name,
-            "type": account_type,
-            "currency": currency,
-            "initial_balance_cents": initial_balance_cents,
-        },
+        json=payload,
         headers=headers,
     )
     assert response.status_code == 200, response.text

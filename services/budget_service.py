@@ -246,7 +246,7 @@ async def update_item(
 # Ingreso esperado (caso de negocio 7)
 
 
-async def _income_for_month(db: AsyncSession, user_id: UUID, month: str) -> int:
+async def income_for_month(db: AsyncSession, user_id: UUID, month: str) -> int:
     period_start, period_end = _month_bounds(month)
     stmt = exclude_transfers(
         select(func.coalesce(func.sum(Transaction.amount_cents), 0)).where(
@@ -264,12 +264,12 @@ async def _compute_expected_income(
     db: AsyncSession, user_id: UUID, budget: Budget, month: str
 ) -> int:
     previous_month = _previous_month_str(month)
-    previous_month_income = await _income_for_month(db, user_id, previous_month)
+    previous_month_income = await income_for_month(db, user_id, previous_month)
 
     months = [previous_month]
     for _ in range(2):
         months.append(_previous_month_str(months[-1]))
-    avg_3m_income = sum([await _income_for_month(db, user_id, m) for m in months]) // 3
+    avg_3m_income = sum([await income_for_month(db, user_id, m) for m in months]) // 3
 
     return expected_income(
         budget.income_basis,  # type: ignore[arg-type]
