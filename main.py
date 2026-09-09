@@ -28,6 +28,7 @@ from routers import (
     recurring,
     reports,
     sync,
+    transaction_templates,
     transactions,
 )
 from storage.db import get_engine
@@ -81,6 +82,7 @@ def create_app() -> FastAPI:
     app.include_router(debts.router)
     app.include_router(goals.router)
     app.include_router(receivables.router)
+    app.include_router(transaction_templates.router)
 
     return app
 
