@@ -159,5 +159,6 @@ class DashboardOut(BaseModel):
     budget: BudgetCurrentOut | None
     upcoming: list[UpcomingItemOut]
     installment_liability: InstallmentLiabilityOut
-    # Fase 5 (receivables): stub, siempre null hasta implementar el servicio.
-    receivable_cents: int | None = None
+    # Total pendiente de cobro (gastos compartidos sin liquidar, caso de
+    # negocio 3) — aparte del patrimonio, nunca sumado a él.
+    receivable_cents: int

@@ -221,7 +221,7 @@ async def test_dashboard_happy_path_aggregates_all_sections(client: AsyncClient)
     due_dates = [item["due_date"] for item in data["upcoming"]]
     assert due_dates == sorted(due_dates)
 
-    assert data["receivable_cents"] is None
+    assert data["receivable_cents"] == 0
 
 
 async def test_dashboard_net_worth_treats_credit_card_balance_as_liability(
@@ -312,12 +312,56 @@ async def test_dashboard_top_categories_limited_to_five(client: AsyncClient) -> 
     assert amounts == sorted(amounts, reverse=True)
 
 
-async def test_dashboard_receivable_cents_is_always_null(client: AsyncClient) -> None:
+async def test_dashboard_receivable_cents_is_zero_without_pending_receivables(
+    client: AsyncClient,
+) -> None:
     headers = await register_and_login(client)
     await create_account(client, headers)
 
     response = await client.get("/v1/reports/dashboard", headers=headers)
-    assert response.json()["data"]["receivable_cents"] is None
+    assert response.json()["data"]["receivable_cents"] == 0
+
+
+async def test_dashboard_receivable_cents_reflects_pending_and_excludes_settled(
+    client: AsyncClient,
+) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
+    month = _current_month()
+
+    expense_id = await _create_transaction(
+        client,
+        headers,
+        account_id=account_id,
+        kind="expense",
+        amount_cents=200_000,
+        date=f"{month}-05",
+    )
+    receivable_id = uuid.uuid4()
+    response = await client.post(
+        "/v1/receivables",
+        json={
+            "id": str(receivable_id),
+            "transaction_id": str(expense_id),
+            "counterparty": "Ana",
+            "amount_cents": 100_000,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+
+    response = await client.get("/v1/reports/dashboard", headers=headers)
+    assert response.json()["data"]["receivable_cents"] == 100_000
+
+    settle = await client.post(
+        f"/v1/receivables/{receivable_id}/settle",
+        json={"id": str(uuid.uuid4()), "account_id": str(account_id), "date": f"{month}-10"},
+        headers={**headers, **_idem()},
+    )
+    assert settle.status_code == 200, settle.text
+
+    response = await client.get("/v1/reports/dashboard", headers=headers)
+    assert response.json()["data"]["receivable_cents"] == 0
 
 
 async def test_dashboard_empty_state_returns_zeros_not_errors(client: AsyncClient) -> None:
@@ -332,7 +376,7 @@ async def test_dashboard_empty_state_returns_zeros_not_errors(client: AsyncClien
     assert data["budget"] is None
     assert data["upcoming"] == []
     assert data["installment_liability"]["total_pending_cents"] == 0
-    assert data["receivable_cents"] is None
+    assert data["receivable_cents"] == 0
 
 
 async def test_dashboard_isolated_from_other_users_data(client: AsyncClient) -> None:

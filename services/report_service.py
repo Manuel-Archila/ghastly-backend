@@ -4,7 +4,7 @@
 Dashboard: una sola llamada para la pantalla "Hoy" — patrimonio neto, flujo
 del mes, top 5 categorías de gasto, presupuesto global (reusa
 `budget_service`), vista previa de próximos vencimientos, pasivo en cuotas
-y el stub de "por cobrar" (Fase 5, todavía no existe esa feature).
+y el total pendiente de cobro (`receivable_service.total_pending_cents`, caso de negocio 3).
 
 By-category: desglose completo por categoría para la dona, de gasto o de
 ingreso, en cualquier rango de fechas.
@@ -96,6 +96,7 @@ from services import (
     budget_service,
     debt_service,
     installment_service,
+    receivable_service,
     recurring_service,
     transaction_service,
 )
@@ -285,6 +286,7 @@ async def get_dashboard(db: AsyncSession, user_id: UUID, month: str | None) -> D
     upcoming = build_upcoming_preview(upcoming_sources, limit=5)
 
     total_liability_cents, by_month = await installment_service.get_liability(db, user_id)
+    receivable_cents = await receivable_service.total_pending_cents(db, user_id)
 
     return DashboardOut(
         month=month,
@@ -317,7 +319,7 @@ async def get_dashboard(db: AsyncSession, user_id: UUID, month: str | None) -> D
             total_pending_cents=total_liability_cents,
             by_month=[MonthAmountOut(month=m, amount_cents=a) for m, a in by_month],
         ),
-        receivable_cents=None,
+        receivable_cents=receivable_cents,
     )
 
 
