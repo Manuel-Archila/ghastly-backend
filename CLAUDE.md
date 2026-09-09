@@ -18,7 +18,9 @@ Ghastly — API de finanzas personales (Guatemala, GTQ). Backend de la app móvi
 
 El job `detect_anomalies` (día 1, 06:00) ya corre para todos los usuarios contra el mes que acaba de cerrar, reusando `report_service.get_anomalies` — deja el rastro en logs (`category_id`, `month`, `percent_increase`; nunca montos) igual que los demás avisos.
 
-Pendientes conocidos: entrega push real (los jobs de aviso dejan rastro en logs, no envían), el gancho de `check_budget_alerts` "tras cada escritura", y `refresh_fx_rates` (no-op hasta decidir fuente de tasas).
+El gancho de `check_budget_alerts` "tras cada escritura" también quedó cerrado: `budget_service.check_alerts_for_category` se llama desde `transaction_service.create_transaction`/`update_transaction`/`restore_transaction` (dentro de la misma transacción de DB, ve el consumo ya actualizado) — el job de las 20:00 sigue corriendo aparte para cubrir presupuestos sin movimiento ese día. `bulk_categorize` y `refund` quedan fuera a propósito: un reembolso resta gasto y nunca cruza un umbral hacia arriba.
+
+Pendientes conocidos: entrega push real (los jobs de aviso, incluido este gancho, dejan rastro en logs pero no envían nada — Fase 5) y `refresh_fx_rates` (no-op hasta decidir fuente de tasas).
 
 ---
 
