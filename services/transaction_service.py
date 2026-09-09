@@ -15,7 +15,8 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, tuple_, update
+from sqlalchemy import Text, cast, or_, select, tuple_, update
+from sqlalchemy.dialects.postgresql import ARRAY as PGArray
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -376,6 +377,8 @@ async def list_transactions(
     account_id: UUID | None = None,
     category_id: UUID | None = None,
     kind: str | None = None,
+    q: str | None = None,
+    tags: list[str] | None = None,
     date_from: date_ | None = None,
     date_to: date_ | None = None,
     min_cents: int | None = None,
@@ -394,6 +397,21 @@ async def list_transactions(
         stmt = stmt.where(Transaction.category_id == category_id)
     if kind is not None:
         stmt = stmt.where(Transaction.kind == kind)
+    if q:
+        pattern = f"%{q}%"
+        stmt = stmt.where(
+            or_(
+                Transaction.description.ilike(pattern),
+                Transaction.merchant.ilike(pattern),
+                Transaction.notes.ilike(pattern),
+            )
+        )
+    if tags:
+        # Cualquiera de los tags pedidos (operador de overlap de Postgres,
+        # no está en el comparator genérico de ARRAY de SQLAlchemy). Cast
+        # explícito: la columna es TEXT[], el bind param sale VARCHAR[] por
+        # default y Postgres no los compara sin castear.
+        stmt = stmt.where(Transaction.tags.op("&&")(cast(tags, PGArray(Text))))
     if date_from is not None:
         stmt = stmt.where(Transaction.date >= date_from)
     if date_to is not None:

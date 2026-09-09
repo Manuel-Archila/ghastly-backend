@@ -359,3 +359,113 @@ async def test_cursor_pagination(client: AsyncClient) -> None:
     assert len(body2["items"]) == 2
     seen_dates = {i["date"] for i in body1["items"] + body2["items"]}
     assert "2026-09-05" in seen_dates and "2026-09-04" in seen_dates
+
+
+async def test_list_filters_by_text_search_across_description_merchant_notes(
+    client: AsyncClient,
+) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=100_000)
+
+    await client.post(
+        "/v1/transactions",
+        json={
+            "id": str(uuid.uuid4()),
+            "account_id": str(account_id),
+            "kind": "expense",
+            "amount_cents": 100,
+            "date": "2026-09-01",
+            "description": "Almuerzo con el equipo",
+        },
+        headers={**headers, **_idem()},
+    )
+    await client.post(
+        "/v1/transactions",
+        json={
+            "id": str(uuid.uuid4()),
+            "account_id": str(account_id),
+            "kind": "expense",
+            "amount_cents": 200,
+            "date": "2026-09-02",
+            "merchant": "Supermercado La Torre",
+        },
+        headers={**headers, **_idem()},
+    )
+    await client.post(
+        "/v1/transactions",
+        json={
+            "id": str(uuid.uuid4()),
+            "account_id": str(account_id),
+            "kind": "expense",
+            "amount_cents": 300,
+            "date": "2026-09-03",
+            "notes": "pendiente de reembolso del equipo",
+        },
+        headers={**headers, **_idem()},
+    )
+
+    response = await client.get("/v1/transactions?q=equipo", headers=headers)
+    assert response.status_code == 200, response.text
+    amounts = {t["amount_cents"] for t in response.json()["data"]["items"]}
+    assert amounts == {100, 300}
+
+    response = await client.get("/v1/transactions?q=torre", headers=headers)
+    amounts = {t["amount_cents"] for t in response.json()["data"]["items"]}
+    assert amounts == {200}
+
+    response = await client.get("/v1/transactions?q=nada-que-coincida", headers=headers)
+    assert response.json()["data"]["items"] == []
+
+
+async def test_list_filters_by_any_matching_tag(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=100_000)
+
+    await client.post(
+        "/v1/transactions",
+        json={
+            "id": str(uuid.uuid4()),
+            "account_id": str(account_id),
+            "kind": "expense",
+            "amount_cents": 100,
+            "date": "2026-09-01",
+            "tags": ["viaje", "trabajo"],
+        },
+        headers={**headers, **_idem()},
+    )
+    await client.post(
+        "/v1/transactions",
+        json={
+            "id": str(uuid.uuid4()),
+            "account_id": str(account_id),
+            "kind": "expense",
+            "amount_cents": 200,
+            "date": "2026-09-02",
+            "tags": ["personal"],
+        },
+        headers={**headers, **_idem()},
+    )
+    await client.post(
+        "/v1/transactions",
+        json={
+            "id": str(uuid.uuid4()),
+            "account_id": str(account_id),
+            "kind": "expense",
+            "amount_cents": 300,
+            "date": "2026-09-03",
+        },
+        headers={**headers, **_idem()},
+    )
+
+    response = await client.get("/v1/transactions?tags=viaje", headers=headers)
+    assert response.status_code == 200, response.text
+    amounts = {t["amount_cents"] for t in response.json()["data"]["items"]}
+    assert amounts == {100}
+
+    # cualquiera de los tags pedidos hace match (overlap, no intersección total)
+    response = await client.get("/v1/transactions?tags=viaje&tags=personal", headers=headers)
+    amounts = {t["amount_cents"] for t in response.json()["data"]["items"]}
+    assert amounts == {100, 200}
+
+    response = await client.get("/v1/transactions?tags=inexistente", headers=headers)
+    assert response.json()["data"]["items"] == []
