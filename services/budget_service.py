@@ -41,7 +41,7 @@ from schemas.budgets import (
     ClosePeriodResult,
     UnbudgetedCategoryOut,
 )
-from services import push_service
+from services import notification_preferences_service, push_service
 from services.change_log import record_change
 from services.query_filters import exclude_transfers
 from storage.models.budget import Budget, BudgetItem, BudgetPeriod, BudgetPeriodItem
@@ -522,9 +522,10 @@ async def get_current(
 # reemplaza la corrida programada, la complementa). `push_service.notify_budget_alert`
 # es quien evita mandar el push dos veces (dedup en `budget_alerts_sent`,
 # válido igual si el gancho y el job caen el mismo umbral el mismo mes).
-
-# Se evalúa de mayor a menor; el primero que aplique gana.
-BUDGET_ALERT_THRESHOLDS = (100, 80)
+#
+# Los umbrales salen de `notification_preferences.budget_alert_thresholds`
+# (default `{80,100}`, PLAN-backend.md §5) — configurables por el usuario
+# desde Ajustes → Notificaciones, ya no un valor fijo en este módulo.
 
 logger = structlog.get_logger("services.budget_service")
 
@@ -544,7 +545,9 @@ async def check_alerts_for_category(
     if item is None:
         return
 
-    threshold = next((t for t in BUDGET_ALERT_THRESHOLDS if item.percent_consumed >= t), None)
+    prefs = await notification_preferences_service.get_or_create(db, user_id)
+    thresholds = sorted(prefs.budget_alert_thresholds, reverse=True)
+    threshold = next((t for t in thresholds if item.percent_consumed >= t), None)
     if threshold is not None:
         logger.info(
             "budget_alert",

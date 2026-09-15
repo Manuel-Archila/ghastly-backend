@@ -15,6 +15,12 @@ commit acá adelantaría ese commit único y rompería la atomicidad
 "todo o nada" documentada ahí. Quien llama a `notify_budget_alert` desde un
 contexto que no vaya a comprometer solo (p. ej. `jobs/check_budget_alerts.py`)
 es responsable de su propio `commit()`.
+
+Todas las `notify_*` respetan `notification_preferences` (canal `push`
+habilitado, fuera de horas de silencio) ANTES de mandar nada. En
+`notify_budget_alert` ese chequeo va antes de reservar el cupo en
+`budget_alerts_sent`: si se saltó por horas de silencio, el mismo umbral
+puede volver a evaluarse más tarde en vez de darse por "ya avisado".
 """
 
 from __future__ import annotations
@@ -26,8 +32,24 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core import push
+from core.timezone import now_in_business_tz
 from domain import notifications
-from storage.models.notification import BudgetAlertSent
+from domain.quiet_hours import is_within_quiet_hours
+from services import notification_preferences_service
+from storage.models.notification import BudgetAlertSent, NotificationPreferences
+
+
+def _can_send_now(prefs: NotificationPreferences) -> bool:
+    if "push" not in prefs.channels:
+        return False
+    current = now_in_business_tz().time()
+    return not is_within_quiet_hours(current, prefs.quiet_hours_start, prefs.quiet_hours_end)
+
+
+async def _send_if_allowed(db: AsyncSession, user_id: UUID, title: str, body: str) -> None:
+    prefs = await notification_preferences_service.get_or_create(db, user_id)
+    if _can_send_now(prefs):
+        await push.send_push_to_user(db, user_id, title, body)
 
 
 async def notify_budget_alert(
@@ -39,6 +61,10 @@ async def notify_budget_alert(
     percent_consumed: int,
     threshold: int,
 ) -> bool:
+    prefs = await notification_preferences_service.get_or_create(db, user_id)
+    if not _can_send_now(prefs):
+        return False
+
     stmt = (
         insert(BudgetAlertSent)
         .values(user_id=user_id, category_id=category_id, month=month, threshold=threshold)
@@ -60,35 +86,35 @@ async def notify_due_reminder_recurring(
     db: AsyncSession, user_id: UUID, rule_name: str, due_date: date
 ) -> None:
     title, body = notifications.due_reminder_recurring_message(rule_name, due_date)
-    await push.send_push_to_user(db, user_id, title, body)
+    await _send_if_allowed(db, user_id, title, body)
 
 
 async def notify_due_reminder_installment(
     db: AsyncSession, user_id: UUID, plan_description: str, due_date: date, number: int
 ) -> None:
     title, body = notifications.due_reminder_installment_message(plan_description, due_date, number)
-    await push.send_push_to_user(db, user_id, title, body)
+    await _send_if_allowed(db, user_id, title, body)
 
 
 async def notify_card_statement(db: AsyncSession, user_id: UUID, account_name: str) -> None:
     title, body = notifications.card_statement_message(account_name)
-    await push.send_push_to_user(db, user_id, title, body)
+    await _send_if_allowed(db, user_id, title, body)
 
 
 async def notify_card_payment_due(db: AsyncSession, user_id: UUID, account_name: str) -> None:
     title, body = notifications.card_payment_due_message(account_name)
-    await push.send_push_to_user(db, user_id, title, body)
+    await _send_if_allowed(db, user_id, title, body)
 
 
 async def notify_recurring_confirmation_pending(
     db: AsyncSession, user_id: UUID, rule_name: str, due_date: date
 ) -> None:
     title, body = notifications.recurring_confirmation_pending_message(rule_name, due_date)
-    await push.send_push_to_user(db, user_id, title, body)
+    await _send_if_allowed(db, user_id, title, body)
 
 
 async def notify_spending_anomaly(
     db: AsyncSession, user_id: UUID, category_name: str, percent_increase: int
 ) -> None:
     title, body = notifications.spending_anomaly_message(category_name, percent_increase)
-    await push.send_push_to_user(db, user_id, title, body)
+    await _send_if_allowed(db, user_id, title, body)

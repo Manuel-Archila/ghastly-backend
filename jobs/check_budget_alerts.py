@@ -1,4 +1,5 @@
-"""Job de las 20:00: alertas de presupuesto al 80%/100%.
+"""Job de las 20:00: alertas de presupuesto sobre los umbrales configurados
+en `notification_preferences.budget_alert_thresholds` (default 80/100).
 
 Complementa el gancho "tras cada escritura" (`budget_service.check_alerts_for_category`,
 llamado desde `transaction_service.create_transaction`/`update_transaction`):
@@ -12,8 +13,7 @@ import structlog
 from sqlalchemy import select
 
 from core.timezone import today_in_business_tz
-from services import budget_service, push_service
-from services.budget_service import BUDGET_ALERT_THRESHOLDS
+from services import budget_service, notification_preferences_service, push_service
 from storage.db import get_session_factory
 from storage.models.budget import Budget
 
@@ -37,10 +37,10 @@ async def run() -> None:
                 current = await budget_service.get_current(db, budget.user_id, None)
             except Exception:
                 continue
+            prefs = await notification_preferences_service.get_or_create(db, budget.user_id)
+            thresholds = sorted(prefs.budget_alert_thresholds, reverse=True)
             for item in current.items:
-                threshold = next(
-                    (t for t in BUDGET_ALERT_THRESHOLDS if item.percent_consumed >= t), None
-                )
+                threshold = next((t for t in thresholds if item.percent_consumed >= t), None)
                 if threshold is not None:
                     logger.info(
                         "budget_alert",

@@ -1,4 +1,9 @@
-"""Job diario (08:00): aviso de vencimientos próximos (recurrentes + cuotas)."""
+"""Job diario (08:00): aviso de vencimientos próximos (recurrentes + cuotas).
+
+Las reglas recurrentes tienen su propio `reminder_days_before` por regla
+(Fase 3); las cuotas no tienen ese campo por cuota, así que usan
+`notification_preferences.due_reminder_days` del dueño (default 3,
+configurable desde Ajustes → Notificaciones)."""
 
 from __future__ import annotations
 
@@ -8,14 +13,17 @@ import structlog
 from sqlalchemy import select
 
 from core.timezone import today_in_business_tz
-from services import push_service
+from services import notification_preferences_service, push_service
 from storage.db import get_session_factory
 from storage.models.installment import Installment, InstallmentPlan
 from storage.models.recurring import RecurringRule
 
 logger = structlog.get_logger("jobs.send_due_reminders")
 
-INSTALLMENT_REMINDER_DAYS = 3
+# Filtro grueso en SQL: el máximo razonable de `due_reminder_days` que
+# alguien configuraría. El filtro exacto (por usuario) se aplica después,
+# en Python — mismo patrón que las reglas recurrentes de abajo.
+MAX_INSTALLMENT_REMINDER_WINDOW_DAYS = 30
 
 
 async def run() -> None:
@@ -42,10 +50,15 @@ async def run() -> None:
             .where(
                 Installment.status == "pending",
                 Installment.due_date >= today,
-                Installment.due_date <= today + timedelta(days=INSTALLMENT_REMINDER_DAYS),
+                Installment.due_date
+                <= today + timedelta(days=MAX_INSTALLMENT_REMINDER_WINDOW_DAYS),
             )
         )
-        due_installments = list(installments_result.all())
+        due_installments = []
+        for installment, plan_description in installments_result.all():
+            prefs = await notification_preferences_service.get_or_create(db, installment.user_id)
+            if (installment.due_date - today).days <= prefs.due_reminder_days:
+                due_installments.append((installment, plan_description))
 
         for rule in due_rules:
             logger.info(
