@@ -6,10 +6,8 @@ veces el mismo día no encuentra nada pendiente la segunda vez. Si el
 servidor estuvo caído varios días, el `while` adentro pone al día todas
 las ocurrencias atrasadas de una sola corrida.
 
-Para `auto_create=false` no se genera nada — solo se deja el rastro en
-logs de que hay una confirmación pendiente. No existe todavía una tabla
-de notificaciones ni entrega push real (`devices.push_token` ya tiene el
-dato, falta el mecanismo de envío — Fase 5).
+Para `auto_create=false` no se genera nada — solo se avisa que hay una
+confirmación pendiente.
 """
 
 from __future__ import annotations
@@ -21,7 +19,7 @@ from sqlalchemy import select
 
 from core.timezone import today_in_business_tz
 from schemas.recurring import RecurringConfirmRequest
-from services import recurring_service
+from services import push_service, recurring_service
 from storage.db import get_session_factory
 from storage.models.recurring import RecurringRule
 
@@ -53,6 +51,10 @@ async def run() -> None:
                     due_date=rule.next_due_date.isoformat(),
                 )
                 pending_confirmations += 1
+                await push_service.notify_recurring_confirmation_pending(
+                    db, rule.user_id, rule.name, rule.next_due_date
+                )
+                await db.commit()
                 continue
 
             while rule.status == "active" and rule.next_due_date <= today:

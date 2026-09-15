@@ -11,7 +11,8 @@ from __future__ import annotations
 import structlog
 from sqlalchemy import select
 
-from services import budget_service
+from core.timezone import today_in_business_tz
+from services import budget_service, push_service
 from services.budget_service import BUDGET_ALERT_THRESHOLDS
 from storage.db import get_session_factory
 from storage.models.budget import Budget
@@ -22,6 +23,8 @@ logger = structlog.get_logger("jobs.check_budget_alerts")
 async def run() -> None:
     session_factory = get_session_factory()
     alerts = 0
+    today = today_in_business_tz()
+    month = f"{today.year:04d}-{today.month:02d}"
 
     async with session_factory() as db:
         result = await db.execute(
@@ -47,5 +50,18 @@ async def run() -> None:
                         threshold=threshold,
                     )
                     alerts += 1
+                    # `notify_budget_alert` se salta el envío si el gancho
+                    # tras cada escritura ya avisó este umbral este mes
+                    # (dedup vía `budget_alerts_sent`, PLAN de Fase 5).
+                    await push_service.notify_budget_alert(
+                        db,
+                        budget.user_id,
+                        item.category_id,
+                        item.category_name,
+                        month,
+                        item.percent_consumed,
+                        threshold,
+                    )
+        await db.commit()
 
     logger.info("check_budget_alerts_done", budgets=len(budgets), alerts=alerts)

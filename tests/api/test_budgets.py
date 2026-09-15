@@ -246,8 +246,9 @@ async def test_close_period_freezes_and_rejects_double_close(client: AsyncClient
 
 # ---------------------------------------------------------------------------
 # Gancho "tras cada escritura" (PLAN-backend.md §9): budget_service.check_alerts_for_category,
-# llamado desde transaction_service al crear/editar/restaurar un gasto. Sin
-# entrega push todavía (CLAUDE.md): el efecto observable es una línea de log.
+# llamado desde transaction_service al crear/editar/restaurar un gasto. Acá
+# solo se verifica el log; el envío de push real (con su dedup) tiene sus
+# propios tests en tests/api/test_push_notifications.py.
 
 
 async def test_creating_expense_over_threshold_logs_budget_alert(

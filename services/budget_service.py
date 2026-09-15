@@ -41,6 +41,7 @@ from schemas.budgets import (
     ClosePeriodResult,
     UnbudgetedCategoryOut,
 )
+from services import push_service
 from services.change_log import record_change
 from services.query_filters import exclude_transfers
 from storage.models.budget import Budget, BudgetItem, BudgetPeriod, BudgetPeriodItem
@@ -518,11 +519,9 @@ async def get_current(
 # la misma transacción de DB, así que ve el consumo ya actualizado sin
 # esperar a un commit. `jobs/check_budget_alerts.py` sigue corriendo a las
 # 20:00 para cubrir presupuestos sin movimiento ese día (el gancho no
-# reemplaza la corrida programada, la complementa). Ninguna de las dos
-# rutas persiste que ya se avisó — solo logs, igual que el resto de avisos
-# (CLAUDE.md: "Pendientes conocidos" — entrega push real es Fase 5) — así
-# que repetir el aviso en cada escritura mientras la categoría siga sobre
-# el umbral no rompe nada.
+# reemplaza la corrida programada, la complementa). `push_service.notify_budget_alert`
+# es quien evita mandar el push dos veces (dedup en `budget_alerts_sent`,
+# válido igual si el gancho y el job caen el mismo umbral el mismo mes).
 
 # Se evalúa de mayor a menor; el primero que aplique gana.
 BUDGET_ALERT_THRESHOLDS = (100, 80)
@@ -553,6 +552,9 @@ async def check_alerts_for_category(
             category_id=str(category_id),
             percent_consumed=item.percent_consumed,
             threshold=threshold,
+        )
+        await push_service.notify_budget_alert(
+            db, user_id, category_id, item.category_name, month, item.percent_consumed, threshold
         )
 
 

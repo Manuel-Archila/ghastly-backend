@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     s3_endpoint_url: str | None = None
     s3_bucket_receipts: str | None = None
 
+    # Entrega push real (Expo Push API) — opcional: sin él, Expo igual
+    # acepta el envío, solo sin el modo "enhanced security" que valida que
+    # la petición viene de esta cuenta de Expo.
+    expo_access_token: str | None = None
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
