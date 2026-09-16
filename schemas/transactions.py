@@ -61,6 +61,7 @@ class RefundCreate(BaseModel):
     amount_cents: int | None = Field(default=None, gt=0)  # default: el total del gasto original
     date: date_ | None = None
     notes: str | None = None
+    fx_rate: Decimal | None = None  # requerida si el gasto original no es GTQ (caso 4)
 
 
 class BulkCategorizeRequest(BaseModel):

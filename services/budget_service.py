@@ -250,8 +250,9 @@ async def update_item(
 
 async def income_for_month(db: AsyncSession, user_id: UUID, month: str) -> int:
     period_start, period_end = _month_bounds(month)
+    amount_expr = func.coalesce(Transaction.base_amount_cents, Transaction.amount_cents)
     stmt = exclude_transfers(
-        select(func.coalesce(func.sum(Transaction.amount_cents), 0)).where(
+        select(func.coalesce(func.sum(amount_expr), 0)).where(
             Transaction.user_id == user_id,
             Transaction.kind == "income",
             Transaction.deleted_at.is_(None),
@@ -287,13 +288,21 @@ async def _compute_expected_income(
 # Un reembolso (caso de negocio 5) es una transacción `income` con
 # `refund_of_id`: RESTA del gasto de su categoría original, nunca suma a
 # ingresos. Todo cálculo de consumo suma gastos y resta reembolsos.
+#
+# `base_amount_cents` (caso 4) es el equivalente en GTQ ya congelado al
+# crear la transacción — coalesce a `amount_cents` porque en GTQ vale lo
+# mismo (`_resolve_fx` lo deja igual, nunca null ahí); solo transferencias,
+# reembolsos y confirmaciones de recurrentes pueden dejarlo null, y esas
+# tres rutas ya lo resuelven (services/transaction_service.py,
+# services/recurring_service.py).
 _spend_or_refund = or_(
     Transaction.kind == "expense",
     Transaction.refund_of_id.is_not(None),
 )
+_amount_in_gtq = func.coalesce(Transaction.base_amount_cents, Transaction.amount_cents)
 _signed_spend = case(
-    (Transaction.refund_of_id.is_not(None), -Transaction.amount_cents),
-    else_=Transaction.amount_cents,
+    (Transaction.refund_of_id.is_not(None), -_amount_in_gtq),
+    else_=_amount_in_gtq,
 )
 
 

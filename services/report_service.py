@@ -139,13 +139,17 @@ def _previous_month_str(month: str) -> str:
 # Ingreso: un reembolso NUNCA es ingreso (caso 5), así que se excluye del
 # todo — no se neteá, se ignora.
 
+# `base_amount_cents` (caso 4) es el equivalente en GTQ ya congelado —
+# coalesce a `amount_cents` porque en GTQ vale lo mismo (nunca null ahí,
+# ver la nota gemela en budget_service.py).
+_amount_in_gtq = func.coalesce(Transaction.base_amount_cents, Transaction.amount_cents)
 _spend_or_refund = or_(
     Transaction.kind == "expense",
     Transaction.refund_of_id.is_not(None),
 )
 _signed_spend = case(
-    (Transaction.refund_of_id.is_not(None), -Transaction.amount_cents),
-    else_=Transaction.amount_cents,
+    (Transaction.refund_of_id.is_not(None), -_amount_in_gtq),
+    else_=_amount_in_gtq,
 )
 _real_income = and_(Transaction.kind == "income", Transaction.refund_of_id.is_(None))
 
@@ -158,7 +162,7 @@ async def _category_rows(
     kind: Literal["expense", "income"],
 ) -> list[CategorySpend]:
     condition: ColumnElement[bool] = _spend_or_refund if kind == "expense" else _real_income
-    amount_expr = _signed_spend if kind == "expense" else Transaction.amount_cents
+    amount_expr = _signed_spend if kind == "expense" else _amount_in_gtq
 
     stmt = exclude_transfers(
         select(Category.id, Category.name, func.coalesce(func.sum(amount_expr), 0))
@@ -248,7 +252,7 @@ async def get_dashboard(db: AsyncSession, user_id: UUID, month: str | None) -> D
     # Flujo del mes: vista de caja bruta (dinero que entró/salió), NO usa el
     # neteo de reembolsos que aplica budget_service a "consumo de categoría".
     stats = await transaction_service.get_stats(
-        db, user_id, date_from=period_start, date_to=period_end
+        db, user_id, date_from=period_start, date_to=period_end, in_base_currency=True
     )
 
     rows = await _category_rows(db, user_id, period_start, period_end, "expense")
@@ -271,6 +275,7 @@ async def get_dashboard(db: AsyncSession, user_id: UUID, month: str | None) -> D
             name=plans_by_id[installment.plan_id].description,
             due_date=installment.due_date,
             amount_cents=installment.amount_cents,
+            currency="GTQ",
         )
         for installment in installments
     ] + [
@@ -280,6 +285,7 @@ async def get_dashboard(db: AsyncSession, user_id: UUID, month: str | None) -> D
             name=rule.name,
             due_date=rule.next_due_date,
             amount_cents=rule.amount_cents,
+            currency=rule.currency,
         )
         for rule in recurring
     ]
@@ -312,6 +318,7 @@ async def get_dashboard(db: AsyncSession, user_id: UUID, month: str | None) -> D
                 name=item.name,
                 due_date=item.due_date,
                 amount_cents=item.amount_cents,
+                currency=item.currency,
             )
             for item in upcoming
         ],
@@ -372,7 +379,7 @@ async def get_cashflow_series(
     # NO se netean los reembolsos (kind=income tal cual quedó guardado).
     period_expr = cast(func.date_trunc(granularity, Transaction.date), SqlDate)
     stmt = exclude_transfers(
-        select(period_expr, Transaction.kind, func.sum(Transaction.amount_cents))
+        select(period_expr, Transaction.kind, func.sum(_amount_in_gtq))
         .where(
             Transaction.user_id == user_id,
             Transaction.deleted_at.is_(None),
@@ -473,7 +480,7 @@ async def get_trends(db: AsyncSession, user_id: UUID, months: int | None) -> Tre
 
     period_expr = cast(func.date_trunc("month", Transaction.date), SqlDate)
     stmt = exclude_transfers(
-        select(period_expr, Transaction.kind, func.sum(Transaction.amount_cents))
+        select(period_expr, Transaction.kind, func.sum(_amount_in_gtq))
         .where(
             Transaction.user_id == user_id,
             Transaction.deleted_at.is_(None),
@@ -488,7 +495,7 @@ async def get_trends(db: AsyncSession, user_id: UUID, months: int | None) -> Tre
     # Ingreso real (sin reembolsos, regla de negocio 5) de la misma ventana,
     # partido por is_extraordinary para los dos promedios del caso 12.
     income_stmt = exclude_transfers(
-        select(Transaction.amount_cents, Transaction.is_extraordinary).where(
+        select(_amount_in_gtq, Transaction.is_extraordinary).where(
             Transaction.user_id == user_id,
             _real_income,
             Transaction.deleted_at.is_(None),
@@ -521,8 +528,12 @@ async def get_comparison(
     a_start, a_end = _month_bounds(a_month)
     b_start, b_end = _month_bounds(b_month)
 
-    a_stats = await transaction_service.get_stats(db, user_id, date_from=a_start, date_to=a_end)
-    b_stats = await transaction_service.get_stats(db, user_id, date_from=b_start, date_to=b_end)
+    a_stats = await transaction_service.get_stats(
+        db, user_id, date_from=a_start, date_to=a_end, in_base_currency=True
+    )
+    b_stats = await transaction_service.get_stats(
+        db, user_id, date_from=b_start, date_to=b_end, in_base_currency=True
+    )
     totals = compare_totals(
         PeriodTotals(a_stats.total_income_cents, a_stats.total_expense_cents),
         PeriodTotals(b_stats.total_income_cents, b_stats.total_expense_cents),
@@ -619,6 +630,7 @@ async def get_upcoming(db: AsyncSession, user_id: UUID, days: int) -> UpcomingCa
             name=plans_by_id[installment.plan_id].description,
             due_date=installment.due_date,
             amount_cents=installment.amount_cents,
+            currency="GTQ",
         )
         for installment in installments
     ] + [
@@ -628,6 +640,7 @@ async def get_upcoming(db: AsyncSession, user_id: UUID, days: int) -> UpcomingCa
             name=rule.name,
             due_date=rule.next_due_date,
             amount_cents=rule.amount_cents,
+            currency=rule.currency,
         )
         for rule in recurring
     ]
@@ -649,6 +662,7 @@ async def get_upcoming(db: AsyncSession, user_id: UUID, days: int) -> UpcomingCa
                     name=account.name,
                     due_date=cycle.statement_date,
                     amount_cents=0,
+                    currency=account.currency,
                 )
             )
         if 0 <= cycle.days_until_payment_due <= days:
@@ -659,6 +673,7 @@ async def get_upcoming(db: AsyncSession, user_id: UUID, days: int) -> UpcomingCa
                     name=account.name,
                     due_date=cycle.payment_due_date,
                     amount_cents=account.current_balance_cents,
+                    currency=account.currency,
                 )
             )
 
@@ -678,6 +693,7 @@ async def get_upcoming(db: AsyncSession, user_id: UUID, days: int) -> UpcomingCa
                     name=debt.name,
                     due_date=due_date,
                     amount_cents=debt.monthly_payment_cents,
+                    currency="GTQ",
                 )
             )
 
@@ -691,6 +707,7 @@ async def get_upcoming(db: AsyncSession, user_id: UUID, days: int) -> UpcomingCa
                 name=item.name,
                 due_date=item.due_date,
                 amount_cents=item.amount_cents,
+                currency=item.currency,
             )
             for item in items
         ],

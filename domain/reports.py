@@ -94,6 +94,9 @@ class UpcomingSource:
     name: str
     due_date: date
     amount_cents: int
+    # Caso 4: solo "recurring" puede no ser GTQ hoy (cuotas/deudas/tarjeta
+    # no tienen columna currency — GTQ por construcción).
+    currency: str = "GTQ"
 
 
 def _sort_upcoming(sources: list[UpcomingSource]) -> list[UpcomingSource]:
