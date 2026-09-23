@@ -3,6 +3,8 @@ from datetime import UTC, datetime
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from tests.api.helpers import create_account, create_category, register_and_login
 
@@ -346,3 +348,64 @@ async def test_expense_in_category_without_budget_does_not_log_alert(
 
     output = capsys.readouterr().out
     assert "budget_alert" not in output
+
+
+# ---------------------------------------------------------------------------
+# Regresión de N+1: el número de queries no puede crecer con las categorías.
+
+
+async def _count_queries(async_engine: AsyncEngine, client: AsyncClient, url: str, headers) -> int:  # type: ignore[no-untyped-def]
+    statements: list[str] = []
+
+    def _on_execute(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+        statements.append(statement)
+
+    event.listen(async_engine.sync_engine, "before_cursor_execute", _on_execute)
+    try:
+        response = await client.get(url, headers=headers)
+    finally:
+        event.remove(async_engine.sync_engine, "before_cursor_execute", _on_execute)
+    assert response.status_code == 200, response.text
+    return len(statements)
+
+
+async def _budget_with_categories(
+    client: AsyncClient, headers: dict[str, str], account_id: uuid.UUID, count: int
+) -> None:
+    items = []
+    for i in range(count):
+        category_id = await create_category(client, headers, name=f"Categoría {i}")
+        items.append(
+            {"id": str(uuid.uuid4()), "category_id": str(category_id), "amount_cents": 100_000}
+        )
+        await _create_expense(
+            client,
+            headers,
+            account_id=account_id,
+            category_id=category_id,
+            amount_cents=10_000,
+            date=f"{_current_month()}-01",
+        )
+    response = await client.post(
+        "/v1/budgets",
+        json={"id": str(uuid.uuid4()), "name": "Muchas categorías", "items": items},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+
+
+async def test_current_query_count_does_not_grow_with_categories(
+    client: AsyncClient, async_engine: AsyncEngine
+) -> None:
+    headers_small = await register_and_login(client, email="small@example.com")
+    account_small = await create_account(client, headers_small, initial_balance_cents=1_000_000)
+    await _budget_with_categories(client, headers_small, account_small, 2)
+
+    headers_large = await register_and_login(client, email="large@example.com")
+    account_large = await create_account(client, headers_large, initial_balance_cents=1_000_000)
+    await _budget_with_categories(client, headers_large, account_large, 8)
+
+    small = await _count_queries(async_engine, client, "/v1/budgets/current", headers_small)
+    large = await _count_queries(async_engine, client, "/v1/budgets/current", headers_large)
+
+    assert large == small, f"get_current hace {large} queries con 8 categorías y {small} con 2"

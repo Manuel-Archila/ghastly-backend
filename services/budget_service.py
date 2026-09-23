@@ -263,16 +263,46 @@ async def income_for_month(db: AsyncSession, user_id: UUID, month: str) -> int:
     return int((await db.execute(stmt)).scalar_one())
 
 
+async def income_by_month(db: AsyncSession, user_id: UUID, months: list[str]) -> dict[str, int]:
+    """Ingreso por mes para varios meses en una sola query (mismo criterio que
+    `income_for_month`). Los meses sin ingresos no aparecen en el dict."""
+    range_start, _ = _month_bounds(min(months))
+    _, range_end = _month_bounds(max(months))
+    month_expr = func.to_char(Transaction.date, "YYYY-MM")
+    stmt = exclude_transfers(
+        select(
+            month_expr,
+            func.coalesce(
+                func.sum(func.coalesce(Transaction.base_amount_cents, Transaction.amount_cents)), 0
+            ),
+        )
+        .where(
+            Transaction.user_id == user_id,
+            Transaction.kind == "income",
+            Transaction.deleted_at.is_(None),
+            Transaction.date >= range_start,
+            Transaction.date <= range_end,
+        )
+        .group_by(month_expr)
+    )
+    return {month: int(total) for month, total in (await db.execute(stmt)).all()}
+
+
 async def _compute_expected_income(
     db: AsyncSession, user_id: UUID, budget: Budget, month: str
 ) -> int:
     previous_month = _previous_month_str(month)
-    previous_month_income = await income_for_month(db, user_id, previous_month)
+    previous_month_income = 0
+    avg_3m_income = 0
 
-    months = [previous_month]
-    for _ in range(2):
-        months.append(_previous_month_str(months[-1]))
-    avg_3m_income = sum([await income_for_month(db, user_id, m) for m in months]) // 3
+    # Con base "fixed" no se consulta nada: `expected_income` ignora ambos.
+    if budget.income_basis != "fixed":
+        months = [previous_month]
+        for _ in range(2):
+            months.append(_previous_month_str(months[-1]))
+        by_month = await income_by_month(db, user_id, months)
+        previous_month_income = by_month.get(previous_month, 0)
+        avg_3m_income = sum(by_month.get(m, 0) for m in months) // 3
 
     return expected_income(
         budget.income_basis,  # type: ignore[arg-type]
@@ -322,6 +352,35 @@ async def _spent_for_category(
     return int((await db.execute(stmt)).scalar_one())
 
 
+async def _spent_by_category(
+    db: AsyncSession, user_id: UUID, period_start: date, period_end: date
+) -> dict[UUID | None, int]:
+    """Consumo neto de TODAS las categorías en una query. La clave `None`
+    agrupa lo que no tiene categoría: entra al total del mes pero no a
+    ningún ítem."""
+    stmt = exclude_transfers(
+        select(Transaction.category_id, func.sum(_signed_spend))
+        .where(
+            Transaction.user_id == user_id,
+            _spend_or_refund,
+            Transaction.deleted_at.is_(None),
+            Transaction.date >= period_start,
+            Transaction.date <= period_end,
+        )
+        .group_by(Transaction.category_id)
+    )
+    return {cid: int(total) for cid, total in (await db.execute(stmt)).all()}
+
+
+async def _category_names(db: AsyncSession, category_ids: set[UUID]) -> dict[UUID, str]:
+    if not category_ids:
+        return {}
+    result = await db.execute(
+        select(Category.id, Category.name).where(Category.id.in_(category_ids))
+    )
+    return {cid: name for cid, name in result.all()}
+
+
 async def _rollover_in_by_category(
     db: AsyncSession, budget_id: UUID, month: str
 ) -> dict[UUID, int]:
@@ -342,11 +401,12 @@ async def _rollover_in_by_category(
 
 async def _compute_live_progress(
     db: AsyncSession,
-    user_id: UUID,
     items: list[BudgetItem],
     month: str,
     period_start: date,
     period_end: date,
+    spent_by_category: dict[UUID | None, int],
+    names: dict[UUID, str],
 ) -> tuple[list[CategoryProgressOut], int, int, int]:
     """Devuelve (progresos, total_presupuestado, días_transcurridos, días_totales)."""
     days_elapsed, days_total = _days_elapsed_and_total(period_start, period_end)
@@ -358,10 +418,7 @@ async def _compute_live_progress(
     progresses: list[CategoryProgressOut] = []
     total_budgeted = 0
     for item in items:
-        category = await db.get(Category, item.category_id)
-        spent_cents = await _spent_for_category(
-            db, user_id, item.category_id, period_start, period_end
-        )
+        spent_cents = spent_by_category.get(item.category_id, 0)
         rollover_in = rollover_in_by_category.get(item.category_id, 0)
 
         progress = compute_item_progress(
@@ -373,7 +430,7 @@ async def _compute_live_progress(
         progresses.append(
             CategoryProgressOut(
                 category_id=item.category_id,
-                category_name=category.name if category else "",
+                category_name=names.get(item.category_id, ""),
                 budgeted_cents=progress.budgeted_cents,
                 rollover_in_cents=progress.rollover_in_cents,
                 spent_cents=progress.spent_cents,
@@ -411,15 +468,19 @@ def _frozen_progress(item: BudgetPeriodItem, category_name: str) -> CategoryProg
 # El endpoint más usado del catálogo
 
 
-async def get_current(
-    db: AsyncSession, user_id: UUID, month: str | None = None
-) -> BudgetCurrentOut:
+async def _get_active_budget(db: AsyncSession, user_id: UUID) -> Budget | None:
     result = await db.execute(
         select(Budget).where(
             Budget.user_id == user_id, Budget.is_active.is_(True), Budget.deleted_at.is_(None)
         )
     )
-    budget = result.scalar_one_or_none()
+    return result.scalar_one_or_none()
+
+
+async def get_current(
+    db: AsyncSession, user_id: UUID, month: str | None = None
+) -> BudgetCurrentOut:
+    budget = await _get_active_budget(db, user_id)
     if budget is None:
         raise NotFoundError("No hay un presupuesto activo.", code="NO_ACTIVE_BUDGET")
 
@@ -436,10 +497,10 @@ async def get_current(
             select(BudgetPeriodItem).where(BudgetPeriodItem.budget_period_id == closed_period.id)
         )
         frozen_items = list(period_items_result.scalars().all())
-        progresses = []
-        for frozen in frozen_items:
-            category = await db.get(Category, frozen.category_id)
-            progresses.append(_frozen_progress(frozen, category.name if category else ""))
+        frozen_names = await _category_names(db, {f.category_id for f in frozen_items})
+        progresses = [
+            _frozen_progress(f, frozen_names.get(f.category_id, "")) for f in frozen_items
+        ]
         total_budgeted = sum(i.budgeted_cents for i in frozen_items)
         total_spent = sum(i.spent_cents for i in frozen_items)
         return BudgetCurrentOut(
@@ -461,47 +522,30 @@ async def get_current(
         .order_by(BudgetItem.sort_order)
     )
     items = list(items_result.scalars().all())
-    progresses, total_budgeted, days_elapsed, days_total = await _compute_live_progress(
-        db, user_id, items, month, period_start, period_end
-    )
-
-    total_spent_stmt = exclude_transfers(
-        select(func.coalesce(func.sum(_signed_spend), 0)).where(
-            Transaction.user_id == user_id,
-            _spend_or_refund,
-            Transaction.deleted_at.is_(None),
-            Transaction.date >= period_start,
-            Transaction.date <= period_end,
-        )
-    )
-    total_spent = (await db.execute(total_spent_stmt)).scalar_one()
-
+    spent_by_category = await _spent_by_category(db, user_id, period_start, period_end)
     budgeted_category_ids = {item.category_id for item in items}
-    unbudgeted_stmt = exclude_transfers(
-        select(Transaction.category_id, func.sum(_signed_spend))
-        .where(
-            Transaction.user_id == user_id,
-            _spend_or_refund,
-            Transaction.deleted_at.is_(None),
-            Transaction.category_id.is_not(None),
-            Transaction.date >= period_start,
-            Transaction.date <= period_end,
-        )
-        .group_by(Transaction.category_id)
+    unbudgeted_ids = {
+        cid
+        for cid, spent in spent_by_category.items()
+        if cid is not None and cid not in budgeted_category_ids and spent > 0
+    }
+    names = await _category_names(db, budgeted_category_ids | unbudgeted_ids)
+
+    progresses, total_budgeted, days_elapsed, days_total = await _compute_live_progress(
+        db, items, month, period_start, period_end, spent_by_category, names
     )
-    unbudgeted_rows = (await db.execute(unbudgeted_stmt)).all()
-    unbudgeted: list[UnbudgetedCategoryOut] = []
-    for category_id, spent in unbudgeted_rows:
-        if category_id in budgeted_category_ids or spent <= 0:
-            continue
-        category = await db.get(Category, category_id)
-        unbudgeted.append(
-            UnbudgetedCategoryOut(
-                category_id=category_id,
-                category_name=category.name if category else "",
-                spent_cents=spent,
-            )
+
+    # Incluye lo que no tiene categoría, igual que antes.
+    total_spent = sum(spent_by_category.values())
+
+    unbudgeted = [
+        UnbudgetedCategoryOut(
+            category_id=cid,
+            category_name=names.get(cid, ""),
+            spent_cents=spent_by_category[cid],
         )
+        for cid in sorted(unbudgeted_ids, key=lambda c: spent_by_category[c], reverse=True)
+    ]
 
     expected_income_cents = await _compute_expected_income(db, user_id, budget, month)
     global_projected = project_period_end(total_spent, days_elapsed, days_total)
@@ -539,34 +583,83 @@ async def get_current(
 logger = structlog.get_logger("services.budget_service")
 
 
+async def _category_progress(
+    db: AsyncSession, user_id: UUID, category_id: UUID, month: str
+) -> tuple[int, str] | None:
+    """`(percent_consumed, category_name)` de UNA categoría, sin armar toda la
+    pantalla de `get_current` — el gancho de alertas corre en cada escritura.
+    Mismo criterio: mes cerrado → dato congelado; abierto → consumo vivo.
+    `None` si no hay presupuesto activo o la categoría no está presupuestada."""
+    budget = await _get_active_budget(db, user_id)
+    if budget is None:
+        return None
+
+    period_result = await db.execute(
+        select(BudgetPeriod).where(BudgetPeriod.budget_id == budget.id, BudgetPeriod.month == month)
+    )
+    closed_period = period_result.scalar_one_or_none()
+
+    if closed_period is not None:
+        frozen_result = await db.execute(
+            select(BudgetPeriodItem).where(
+                BudgetPeriodItem.budget_period_id == closed_period.id,
+                BudgetPeriodItem.category_id == category_id,
+            )
+        )
+        frozen = frozen_result.scalar_one_or_none()
+        if frozen is None:
+            return None
+        progress = compute_item_progress(
+            budgeted_cents=frozen.budgeted_cents,
+            spent_cents=frozen.spent_cents,
+            rollover_in_cents=frozen.rollover_in_cents,
+        )
+    else:
+        item_result = await db.execute(
+            select(BudgetItem).where(
+                BudgetItem.budget_id == budget.id,
+                BudgetItem.category_id == category_id,
+                BudgetItem.deleted_at.is_(None),
+            )
+        )
+        item = item_result.scalars().first()
+        if item is None:
+            return None
+        period_start, period_end = _month_bounds(month)
+        spent = await _spent_for_category(db, user_id, category_id, period_start, period_end)
+        rollover_in = (await _rollover_in_by_category(db, budget.id, month)).get(category_id, 0)
+        progress = compute_item_progress(
+            budgeted_cents=item.amount_cents, spent_cents=spent, rollover_in_cents=rollover_in
+        )
+
+    names = await _category_names(db, {category_id})
+    return progress.percent_consumed, names.get(category_id, "")
+
+
 async def check_alerts_for_category(
     db: AsyncSession, user_id: UUID, category_id: UUID, month: str
 ) -> None:
     """No hace nada si el usuario no tiene presupuesto activo o la
     categoría no está presupuestada ese mes — no es un error, es el caso
     común de un gasto en una categoría sin límite."""
-    try:
-        current = await get_current(db, user_id, month)
-    except NotFoundError:
+    progress = await _category_progress(db, user_id, category_id, month)
+    if progress is None:
         return
-
-    item = next((i for i in current.items if i.category_id == category_id), None)
-    if item is None:
-        return
+    percent_consumed, category_name = progress
 
     prefs = await notification_preferences_service.get_or_create(db, user_id)
     thresholds = sorted(prefs.budget_alert_thresholds, reverse=True)
-    threshold = next((t for t in thresholds if item.percent_consumed >= t), None)
+    threshold = next((t for t in thresholds if percent_consumed >= t), None)
     if threshold is not None:
         logger.info(
             "budget_alert",
             user_id=str(user_id),
             category_id=str(category_id),
-            percent_consumed=item.percent_consumed,
+            percent_consumed=percent_consumed,
             threshold=threshold,
         )
         await push_service.notify_budget_alert(
-            db, user_id, category_id, item.category_name, month, item.percent_consumed, threshold
+            db, user_id, category_id, category_name, month, percent_consumed, threshold
         )
 
 
@@ -591,8 +684,10 @@ async def close_period(
         select(BudgetItem).where(BudgetItem.budget_id == budget.id, BudgetItem.deleted_at.is_(None))
     )
     items = list(items_result.scalars().all())
+    spent_by_category = await _spent_by_category(db, user_id, period_start, period_end)
+    names = await _category_names(db, {item.category_id for item in items})
     progresses, _, _, _ = await _compute_live_progress(
-        db, user_id, items, month, period_start, period_end
+        db, items, month, period_start, period_end, spent_by_category, names
     )
     expected_income_cents = await _compute_expected_income(db, user_id, budget, month)
 
