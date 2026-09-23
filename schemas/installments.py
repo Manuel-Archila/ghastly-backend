@@ -8,6 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from schemas.common import PatchModel
+
 
 class InstallmentPlanCreate(BaseModel):
     id: UUID
@@ -24,7 +26,8 @@ class InstallmentPlanCreate(BaseModel):
     installment_ids: list[UUID]
 
 
-class InstallmentPlanUpdate(BaseModel):
+class InstallmentPlanUpdate(PatchModel):
+    non_nullable = frozenset({"description"})
     description: str | None = Field(default=None, min_length=1, max_length=500)
     merchant: str | None = None
     category_id: UUID | None = None

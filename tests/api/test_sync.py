@@ -275,3 +275,46 @@ async def test_push_creates_budget_and_item_offline(client: AsyncClient) -> None
     current = await client.get("/v1/budgets/current", headers=headers)
     assert current.status_code == 200
     assert current.json()["data"]["items"][0]["budgeted_cents"] == 250_000
+
+
+async def test_push_with_invalid_mutation_does_not_break_the_batch(client: AsyncClient) -> None:
+    headers, device_id = await register_and_login_with_device(client)
+    account_id = await create_account(client, headers, name="Original")
+    other_id = uuid.uuid4()
+    bad_id, good_id = str(uuid.uuid4()), str(uuid.uuid4())
+    later = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+
+    response = await client.post(
+        "/v1/sync/push",
+        json={
+            "device_id": str(device_id),
+            "mutations": [
+                {
+                    "client_mutation_id": bad_id,
+                    "entity_type": "account",
+                    "entity_id": str(account_id),
+                    "op": "upsert",
+                    "payload": {"name": None},
+                    "client_updated_at": later,
+                },
+                {
+                    "client_mutation_id": good_id,
+                    "entity_type": "account",
+                    "entity_id": str(other_id),
+                    "op": "upsert",
+                    "payload": {"id": str(other_id), "name": "Buena", "type": "cash"},
+                    "client_updated_at": later,
+                },
+            ],
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["applied"] == [good_id]
+    assert [(c["client_mutation_id"], c["reason"]) for c in data["conflicts"]] == [
+        (bad_id, "VALIDATION_ERROR")
+    ]
+
+    unchanged = await client.get(f"/v1/accounts/{account_id}", headers=headers)
+    assert unchanged.json()["data"]["name"] == "Original"

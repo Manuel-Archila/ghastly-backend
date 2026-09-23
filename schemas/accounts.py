@@ -8,6 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from schemas.common import PatchModel
+
 AccountType = Literal[
     "checking", "savings", "credit_card", "cash", "investment", "loan", "digital_wallet"
 ]
@@ -33,7 +35,8 @@ class AccountCreate(BaseModel):
     minimum_payment_percent: Decimal | None = Field(default=None, ge=0, le=100)
 
 
-class AccountUpdate(BaseModel):
+class AccountUpdate(PatchModel):
+    non_nullable = frozenset({"name", "sort_order"})
     name: str | None = Field(default=None, min_length=1, max_length=255)
     institution: str | None = None
     last_four: str | None = Field(default=None, max_length=4)

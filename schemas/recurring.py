@@ -8,6 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from schemas.common import PatchModel
+
 Frequency = Literal["daily", "weekly", "monthly", "quarterly", "yearly"]
 
 
@@ -29,7 +31,8 @@ class RecurringRuleCreate(BaseModel):
     is_extraordinary: bool = False
 
 
-class RecurringRuleUpdate(BaseModel):
+class RecurringRuleUpdate(PatchModel):
+    non_nullable = frozenset({"name", "amount_cents", "auto_create", "reminder_days_before"})
     name: str | None = Field(default=None, min_length=1, max_length=255)
     category_id: UUID | None = None
     amount_cents: int | None = Field(default=None, gt=0)

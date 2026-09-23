@@ -8,6 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from schemas.common import PatchModel
+
 DebtType = Literal["personal_loan", "mortgage", "auto_loan", "student_loan", "other"]
 
 
@@ -23,7 +25,8 @@ class DebtCreate(BaseModel):
     linked_account_id: UUID | None = None
 
 
-class DebtUpdate(BaseModel):
+class DebtUpdate(PatchModel):
+    non_nullable = frozenset({"name"})
     name: str | None = Field(default=None, min_length=1, max_length=255)
     monthly_payment_cents: int | None = Field(default=None, gt=0)
     term_months: int | None = Field(default=None, gt=0)

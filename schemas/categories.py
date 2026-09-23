@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from schemas.common import PatchModel
+
 CategoryKind = Literal["expense", "income"]
 
 
@@ -20,7 +22,8 @@ class CategoryCreate(BaseModel):
     sort_order: int = 0
 
 
-class CategoryUpdate(BaseModel):
+class CategoryUpdate(PatchModel):
+    non_nullable = frozenset({"name", "is_tax_deductible", "sort_order"})
     name: str | None = Field(default=None, min_length=1, max_length=255)
     parent_id: UUID | None = None
     icon: str | None = None

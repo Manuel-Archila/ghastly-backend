@@ -6,6 +6,7 @@ import uuid
 
 import structlog
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -45,9 +46,13 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def handle_validation_error(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        # Un `ValueError` lanzado dentro de un validador viaja en
+        # `ctx.error` y no es serializable: sin esto la respuesta 422 se
+        # convertía en un 500.
+        errors = jsonable_encoder(exc.errors(), custom_encoder={ValueError: str})
         envelope = fail(
             "Los datos enviados no son válidos.",
-            {"code": "VALIDATION_ERROR", "errors": exc.errors()},
+            {"code": "VALIDATION_ERROR", "errors": errors},
         )
         return JSONResponse(status_code=422, content=envelope.model_dump())
 

@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -326,6 +327,13 @@ async def push(
             # 500 que tumbe el lote completo — un push de 2000 debe tolerarlo.
             await db.rollback()
             was_applied, reason, server_payload = False, exc.code, None
+        except ValidationError:
+            # Payload que no cumple el schema (un `null` en un campo NOT NULL,
+            # un valor fuera de rango...): mismo trato que un error de negocio.
+            # Sin esto, una mutación mala tumba el lote y el cliente la
+            # reintenta para siempre.
+            await db.rollback()
+            was_applied, reason, server_payload = False, "VALIDATION_ERROR", None
 
         db.add(
             ProcessedMutation(
