@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.response import ApiResponse, ok
@@ -14,6 +14,7 @@ from schemas.budgets import (
     BudgetItemCreate,
     BudgetItemOut,
     BudgetItemUpdate,
+    BudgetItemWriteOut,
     BudgetOut,
     BudgetUpdate,
     ClosePeriodResult,
@@ -85,15 +86,40 @@ async def delete_budget(
     return ok(None, "Presupuesto eliminado.")
 
 
+@router.get("/{budget_id}/items")
+async def list_items(
+    budget_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiResponse[list[BudgetItemOut]]:
+    items = await budget_service.list_items(db, current_user.id, budget_id)
+    return ok([BudgetItemOut.model_validate(i) for i in items])
+
+
 @router.post("/{budget_id}/items")
 async def add_item(
     budget_id: UUID,
     payload: BudgetItemCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> ApiResponse[BudgetItemOut]:
+) -> ApiResponse[BudgetItemWriteOut]:
     item = await budget_service.add_item(db, current_user.id, budget_id, payload)
-    return ok(BudgetItemOut.model_validate(item), "Categoría asignada al presupuesto.")
+    warning = await budget_service.hierarchy_warning(db, current_user.id, item)
+    return ok(
+        BudgetItemWriteOut(**BudgetItemOut.model_validate(item).model_dump(), warning=warning),
+        "Categoría asignada al presupuesto.",
+    )
+
+
+@router.get("/{budget_id}/items/{item_id}")
+async def get_item(
+    budget_id: UUID,
+    item_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiResponse[BudgetItemOut]:
+    item = await budget_service.get_item(db, current_user.id, budget_id, item_id)
+    return ok(BudgetItemOut.model_validate(item))
 
 
 @router.patch("/{budget_id}/items/{item_id}")
@@ -103,9 +129,24 @@ async def update_item(
     payload: BudgetItemUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> ApiResponse[BudgetItemOut]:
+) -> ApiResponse[BudgetItemWriteOut]:
     item = await budget_service.update_item(db, current_user.id, budget_id, item_id, payload)
-    return ok(BudgetItemOut.model_validate(item), "Ítem actualizado.")
+    warning = await budget_service.hierarchy_warning(db, current_user.id, item)
+    return ok(
+        BudgetItemWriteOut(**BudgetItemOut.model_validate(item).model_dump(), warning=warning),
+        "Ítem actualizado.",
+    )
+
+
+@router.delete("/{budget_id}/items/{item_id}")
+async def delete_item(
+    budget_id: UUID,
+    item_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiResponse[None]:
+    await budget_service.delete_item(db, current_user.id, budget_id, item_id)
+    return ok(None, "Categoría quitada del presupuesto.")
 
 
 @router.post("/{budget_id}/copy-from-previous")
@@ -127,6 +168,17 @@ async def close_period(
 ) -> ApiResponse[ClosePeriodResult]:
     result = await budget_service.close_period(db, current_user.id, budget_id, month)
     return ok(result, "Período cerrado.")
+
+
+@router.delete("/{budget_id}/periods/{month}")
+async def reopen_period(
+    budget_id: UUID,
+    month: str = Path(pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiResponse[None]:
+    await budget_service.reopen_period(db, current_user.id, budget_id, month)
+    return ok(None, "Período reabierto.")
 
 
 @router.get("/{budget_id}/history")

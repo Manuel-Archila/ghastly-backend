@@ -219,6 +219,15 @@ async def register_device(db: AsyncSession, user_id: UUID, data: DeviceUpsertReq
     return device
 
 
+async def list_devices(db: AsyncSession, user_id: UUID) -> list[Device]:
+    result = await db.execute(
+        select(Device)
+        .where(Device.user_id == user_id)
+        .order_by(Device.last_seen_at.desc().nullslast(), Device.created_at)
+    )
+    return list(result.scalars().all())
+
+
 async def delete_device(db: AsyncSession, user_id: UUID, device_id: UUID) -> None:
     device = await db.get(Device, device_id)
     if device is None or device.user_id != user_id:

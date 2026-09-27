@@ -7,6 +7,7 @@ por `exclude_transfers()`) y le pasa los números a este módulo.
 
 from __future__ import annotations
 
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
@@ -96,3 +97,73 @@ def expected_income(
     if basis == "avg_3m":
         return avg_3m_cents
     raise ValueError(f"income_basis desconocido: {basis}")
+
+
+# ---------------------------------------------------------------------------
+# Jerarquía padre/hijo (dos niveles, igual que `domain/categories.py`)
+#
+# El vínculo NO se guarda en el ítem: se deriva de `categories.parent_id`. Un
+# ítem es "hijo" cuando el presupuesto también tiene un ítem para la categoría
+# padre de la suya. Así no puede quedar desincronizado si la categoría cambia
+# de padre o se fusiona.
+#
+# El tope del padre se ADVIERTE, no se bloquea (regla de negocio 7).
+
+
+def effective_parents[K: Hashable](category_parent: Mapping[K, K | None]) -> dict[K, K | None]:
+    """`category_parent`: categoría presupuestada -> su `parent_id` (o None).
+    Devuelve el mismo mapa pero con None donde el padre NO tiene ítem propio en
+    el presupuesto — ese ítem queda como raíz."""
+    return {
+        category: (parent if parent in category_parent else None)
+        for category, parent in category_parent.items()
+    }
+
+
+def rollup_spent[K: Hashable](
+    category: K, child_categories: Sequence[K], spent_by_category: Mapping[K | None, int]
+) -> int:
+    """Consumo de un ítem: su categoría más las categorías hijas. Cada
+    transacción tiene UNA categoría, así que no hay doble conteo aunque un hijo
+    tenga además su propio ítem."""
+    return spent_by_category.get(category, 0) + sum(
+        spent_by_category.get(child, 0) for child in child_categories
+    )
+
+
+def children_excess(parent_cents: int, children_cents: Sequence[int]) -> int:
+    """Cuánto se pasan los hijos del tope del padre (0 si caben)."""
+    return max(0, sum(children_cents) - parent_cents)
+
+
+@dataclass(frozen=True, slots=True)
+class HierarchySummary[K: Hashable]:
+    children_budgeted: dict[K, int]  # categoría padre -> suma de sus hijos
+    children_excess: dict[K, int]  # categoría padre -> exceso (solo si > 0)
+    root_total_cents: int  # suma de ítems raíz: lo que de verdad se presupuesta
+
+
+def summarize_hierarchy[K: Hashable](
+    budgeted: Mapping[K, int], parent_of: Mapping[K, K | None]
+) -> HierarchySummary[K]:
+    """`parent_of` ya viene de `effective_parents`. El total presupuestado cuenta
+    solo las raíces: los hijos son un reparto DENTRO del tope del padre, sumarlos
+    duplicaría plata."""
+    children: dict[K, list[int]] = {}
+    root_total = 0
+    for category, amount in budgeted.items():
+        parent = parent_of.get(category)
+        if parent is None:
+            root_total += amount
+        else:
+            children.setdefault(parent, []).append(amount)
+
+    return HierarchySummary(
+        children_budgeted={parent: sum(cents) for parent, cents in children.items()},
+        children_excess={
+            parent: excess
+            for parent, cents in children.items()
+            if (excess := children_excess(budgeted[parent], cents)) > 0
+        },
+        root_total_cents=root_total,
+    )

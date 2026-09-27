@@ -27,6 +27,7 @@ from schemas.accounts import AccountCreate, AccountOut, AccountUpdate
 from schemas.budgets import (
     BudgetCreate,
     BudgetItemCreate,
+    BudgetItemOut,
     BudgetItemUpdate,
     BudgetOut,
     BudgetUpdate,
@@ -221,7 +222,7 @@ BUDGET_EDITABLE_FIELDS = {
     "income_basis",
     "fixed_income_cents",
 }
-BUDGET_ITEM_EDITABLE_FIELDS = {"amount_cents", "rollover_enabled", "sort_order"}
+BUDGET_ITEM_EDITABLE_FIELDS = {"category_id", "amount_cents", "rollover_enabled", "sort_order"}
 
 
 async def _apply_budget(
@@ -256,18 +257,31 @@ async def _apply_budget(
 async def _apply_budget_item(
     db: AsyncSession, user_id: UUID, mutation: SyncMutationIn
 ) -> _MutationOutcome:
-    budget_id = mutation.payload.get("budget_id")
-    if budget_id is None:
-        return False, "BUDGET_ITEM_MISSING_BUDGET_ID", None
-
     existing = await db.get(BudgetItem, mutation.entity_id)
+
+    if existing is not None and existing.user_id != user_id:
+        return False, "BUDGET_ITEM_OWNED_BY_OTHER", None
+
+    if mutation.op == "delete":
+        if existing is None or existing.deleted_at is not None:
+            return True, None, None
+        await budget_service.delete_item(db, user_id, existing.budget_id, mutation.entity_id)
+        return True, None, None
+
     if existing is None:
+        budget_id = mutation.payload.get("budget_id")
+        if budget_id is None:
+            return False, "BUDGET_ITEM_MISSING_BUDGET_ID", None
         data = BudgetItemCreate.model_validate({**mutation.payload, "id": mutation.entity_id})
         await budget_service.add_item(db, user_id, UUID(str(budget_id)), data)
         return True, None, None
 
-    if existing.user_id != user_id:
-        return False, "BUDGET_ITEM_OWNED_BY_OTHER", None
+    if existing.deleted_at is not None:
+        return (
+            False,
+            "DELETED_ON_SERVER",
+            BudgetItemOut.model_validate(existing).model_dump(mode="json"),
+        )
 
     filtered = {k: v for k, v in mutation.payload.items() if k in BUDGET_ITEM_EDITABLE_FIELDS}
     await budget_service.update_item(
