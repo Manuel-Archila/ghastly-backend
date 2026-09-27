@@ -8,6 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from schemas.common import PatchModel
+
 TransactionKind = Literal["expense", "income", "transfer"]
 
 
@@ -32,7 +34,10 @@ class TransactionCreate(BaseModel):
     template_id: UUID | None = None
 
 
-class TransactionUpdate(BaseModel):
+class TransactionUpdate(PatchModel):
+    non_nullable = frozenset(
+        {"date", "is_reconciled", "is_tax_relevant", "is_extraordinary", "tags"}
+    )
     category_id: UUID | None = None
     date: date_ | None = None
     description: str | None = Field(default=None, max_length=500)
@@ -61,6 +66,7 @@ class RefundCreate(BaseModel):
     amount_cents: int | None = Field(default=None, gt=0)  # default: el total del gasto original
     date: date_ | None = None
     notes: str | None = None
+    fx_rate: Decimal | None = None  # requerida si el gasto original no es GTQ (caso 4)
 
 
 class BulkCategorizeRequest(BaseModel):

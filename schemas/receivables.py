@@ -7,12 +7,20 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from schemas.common import PatchModel
+
 
 class ReceivableCreate(BaseModel):
     id: UUID
     transaction_id: UUID
     counterparty: str = Field(min_length=1, max_length=255)
     amount_cents: int = Field(gt=0)
+
+
+class ReceivableUpdate(PatchModel):
+    non_nullable = frozenset({"counterparty", "amount_cents"})
+    counterparty: str | None = Field(default=None, min_length=1, max_length=255)
+    amount_cents: int | None = Field(default=None, gt=0)
 
 
 class ReceivableSettle(BaseModel):

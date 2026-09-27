@@ -7,7 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.response import ApiResponse, ok
 from dependencies import get_current_user, get_db
-from schemas.transaction_templates import TransactionTemplateCreate, TransactionTemplateOut
+from schemas.transaction_templates import (
+    TransactionTemplateCreate,
+    TransactionTemplateOut,
+    TransactionTemplateUpdate,
+)
 from services import transaction_template_service
 from storage.models.user import User
 
@@ -31,6 +35,29 @@ async def create_template(
 ) -> ApiResponse[TransactionTemplateOut]:
     template = await transaction_template_service.create_template(db, current_user.id, payload)
     return ok(TransactionTemplateOut.model_validate(template), "Plantilla creada.")
+
+
+@router.get("/{template_id}")
+async def get_template(
+    template_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiResponse[TransactionTemplateOut]:
+    template = await transaction_template_service.get_template(db, current_user.id, template_id)
+    return ok(TransactionTemplateOut.model_validate(template))
+
+
+@router.patch("/{template_id}")
+async def update_template(
+    template_id: UUID,
+    payload: TransactionTemplateUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiResponse[TransactionTemplateOut]:
+    template = await transaction_template_service.update_template(
+        db, current_user.id, template_id, payload
+    )
+    return ok(TransactionTemplateOut.model_validate(template), "Plantilla actualizada.")
 
 
 @router.delete("/{template_id}")

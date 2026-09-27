@@ -23,7 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.errors import ConflictError, NotFoundError, ValidationAppError
 from domain.balances import LedgerEntry, signed_delta
-from schemas.receivables import ReceivableCreate, ReceivableOut, ReceivableSettle
+from schemas.receivables import (
+    ReceivableCreate,
+    ReceivableOut,
+    ReceivableSettle,
+    ReceivableUpdate,
+)
 from services.change_log import record_change
 from storage.models.account import Account
 from storage.models.receivable import Receivable
@@ -60,6 +65,28 @@ async def _get_owned_transaction(
     return transaction
 
 
+async def _require_within_transaction_amount(
+    db: AsyncSession,
+    transaction: Transaction,
+    amount_cents: int,
+    *,
+    except_receivable_id: UUID | None = None,
+) -> None:
+    """Lo que deben todos por un gasto no puede superar el monto del gasto."""
+    stmt = select(func.coalesce(func.sum(Receivable.amount_cents), 0)).where(
+        Receivable.transaction_id == transaction.id, Receivable.deleted_at.is_(None)
+    )
+    if except_receivable_id is not None:
+        stmt = stmt.where(Receivable.id != except_receivable_id)
+    already_claimed = (await db.execute(stmt)).scalar_one()
+    if already_claimed + amount_cents > transaction.amount_cents:
+        raise ValidationAppError(
+            "La suma de lo que deben por este gasto no puede superar el monto del gasto.",
+            field="amount_cents",
+            code="RECEIVABLE_EXCEEDS_TRANSACTION_AMOUNT",
+        )
+
+
 async def create_receivable(db: AsyncSession, user_id: UUID, data: ReceivableCreate) -> Receivable:
     transaction = await _get_owned_transaction(db, user_id, data.transaction_id)
     if transaction.kind != "expense":
@@ -69,16 +96,7 @@ async def create_receivable(db: AsyncSession, user_id: UUID, data: ReceivableCre
             code="RECEIVABLE_REQUIRES_EXPENSE_TRANSACTION",
         )
 
-    already_claimed_stmt = select(func.coalesce(func.sum(Receivable.amount_cents), 0)).where(
-        Receivable.transaction_id == data.transaction_id, Receivable.deleted_at.is_(None)
-    )
-    already_claimed = (await db.execute(already_claimed_stmt)).scalar_one()
-    if already_claimed + data.amount_cents > transaction.amount_cents:
-        raise ValidationAppError(
-            "La suma de lo que deben por este gasto no puede superar el monto del gasto.",
-            field="amount_cents",
-            code="RECEIVABLE_EXCEEDS_TRANSACTION_AMOUNT",
-        )
+    await _require_within_transaction_amount(db, transaction, data.amount_cents)
 
     receivable = Receivable(
         id=data.id,
@@ -120,6 +138,65 @@ async def list_receivables(db: AsyncSession, user_id: UUID) -> list[Receivable]:
 
 async def get_receivable(db: AsyncSession, user_id: UUID, receivable_id: UUID) -> Receivable:
     return await _get_owned(db, user_id, receivable_id)
+
+
+def _require_pending(receivable: Receivable) -> None:
+    if receivable.settled_at is not None:
+        raise ConflictError(
+            "Este gasto compartido ya se liquidó; no se puede modificar.",
+            code="RECEIVABLE_ALREADY_SETTLED",
+        )
+
+
+async def update_receivable(
+    db: AsyncSession, user_id: UUID, receivable_id: UUID, data: ReceivableUpdate
+) -> Receivable:
+    """Solo mientras esté pendiente: una vez liquidado hay un ingreso real ligado
+    y cambiar el monto lo dejaría descuadrado."""
+    receivable = await _get_owned(db, user_id, receivable_id)
+    _require_pending(receivable)
+    changes = data.model_dump(exclude_unset=True)
+
+    if "amount_cents" in changes:
+        transaction = await db.get(Transaction, receivable.transaction_id)
+        if transaction is not None:
+            await _require_within_transaction_amount(
+                db, transaction, changes["amount_cents"], except_receivable_id=receivable.id
+            )
+
+    for field, value in changes.items():
+        setattr(receivable, field, value)
+    receivable.updated_at = datetime.now(UTC)
+    await db.flush()
+    await record_change(
+        db,
+        user_id=user_id,
+        entity_type="receivable",
+        op="upsert",
+        entity=receivable,
+        payload=to_out(receivable).model_dump(mode="json"),
+    )
+    await db.commit()
+    await db.refresh(receivable)
+    return receivable
+
+
+async def delete_receivable(db: AsyncSession, user_id: UUID, receivable_id: UUID) -> None:
+    receivable = await _get_owned(db, user_id, receivable_id)
+    _require_pending(receivable)
+    now = datetime.now(UTC)
+    receivable.deleted_at = now
+    receivable.updated_at = now
+    await db.flush()
+    await record_change(
+        db,
+        user_id=user_id,
+        entity_type="receivable",
+        op="delete",
+        entity=receivable,
+        payload={"id": str(receivable.id)},
+    )
+    await db.commit()
 
 
 async def total_pending_cents(db: AsyncSession, user_id: UUID) -> int:

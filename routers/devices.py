@@ -14,6 +14,15 @@ from storage.models.user import User
 router = APIRouter(prefix="/v1/devices", tags=["devices"])
 
 
+@router.get("")
+async def list_devices(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiResponse[list[DeviceOut]]:
+    devices = await auth_service.list_devices(db, current_user.id)
+    return ok([DeviceOut.model_validate(d) for d in devices])
+
+
 @router.post("")
 async def register_device(
     payload: DeviceUpsertRequest,

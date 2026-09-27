@@ -212,3 +212,105 @@ async def test_cross_user_cannot_see_or_delete_template(client: AsyncClient) -> 
     )
     assert delete_response.status_code == 404
     assert delete_response.json()["data"]["code"] == "TEMPLATE_NOT_FOUND"
+
+
+async def test_get_template_by_id(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
+    template_id = await _create_template(client, headers, account_id=account_id, name="Café")
+
+    response = await client.get(f"/v1/transaction-templates/{template_id}", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["data"]["name"] == "Café"
+
+    missing = await client.get(f"/v1/transaction-templates/{uuid.uuid4()}", headers=headers)
+    assert missing.status_code == 404
+    assert missing.json()["data"]["code"] == "TEMPLATE_NOT_FOUND"
+
+
+async def test_patch_template_updates_fields_and_keeps_use_count(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
+    other_account = await create_account(client, headers, name="Otra")
+    category_id = await create_category(client, headers, name="Comida")
+    template_id = await _create_template(
+        client, headers, account_id=account_id, category_id=category_id
+    )
+
+    response = await client.patch(
+        f"/v1/transaction-templates/{template_id}",
+        json={"name": "Almuerzo", "amount_cents": 7_500, "account_id": str(other_account)},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert (data["name"], data["amount_cents"]) == ("Almuerzo", 7_500)
+    assert data["account_id"] == str(other_account)
+    assert data["category_id"] == str(category_id)  # lo omitido no se toca
+
+    cleared = await client.patch(
+        f"/v1/transaction-templates/{template_id}", json={"category_id": None}, headers=headers
+    )
+    assert cleared.json()["data"]["category_id"] is None
+
+
+async def test_patch_template_validates_references(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
+    expense_cat = await create_category(client, headers, name="Comida")
+    income_cat = await create_category(client, headers, name="Sueldo", kind="income")
+    template_id = await _create_template(
+        client, headers, account_id=account_id, category_id=expense_cat
+    )
+    url = f"/v1/transaction-templates/{template_id}"
+
+    wrong_category = await client.patch(url, json={"category_id": str(income_cat)}, headers=headers)
+    assert wrong_category.status_code == 422
+    assert wrong_category.json()["data"]["code"] == "CATEGORY_KIND_MISMATCH"
+
+    # Cambiar solo el tipo deja la categoría vieja incompatible.
+    wrong_kind = await client.patch(url, json={"kind": "income"}, headers=headers)
+    assert wrong_kind.status_code == 422
+    assert wrong_kind.json()["data"]["code"] == "CATEGORY_KIND_MISMATCH"
+
+    both = await client.patch(
+        url, json={"kind": "income", "category_id": str(income_cat)}, headers=headers
+    )
+    assert both.status_code == 200
+
+    unknown_account = await client.patch(
+        url, json={"account_id": str(uuid.uuid4())}, headers=headers
+    )
+    assert unknown_account.status_code == 404
+    assert unknown_account.json()["data"]["code"] == "ACCOUNT_NOT_FOUND"
+
+    for field in ("name", "account_id", "kind", "amount_cents"):
+        null_field = await client.patch(url, json={field: None}, headers=headers)
+        assert null_field.status_code == 422, field
+
+
+async def test_cross_user_cannot_get_or_patch_template(client: AsyncClient) -> None:
+    headers_a = await register_and_login(client, email="template-a@example.com")
+    headers_b = await register_and_login(client, email="template-b@example.com")
+    account_a = await create_account(client, headers_a, initial_balance_cents=1_000_000)
+    account_b = await create_account(client, headers_b, initial_balance_cents=1_000_000)
+    template_id = await _create_template(client, headers_a, account_id=account_a, name="Mío")
+    url = f"/v1/transaction-templates/{template_id}"
+
+    for response in (
+        await client.get(url, headers=headers_b),
+        await client.patch(url, json={"name": "Robado"}, headers=headers_b),
+    ):
+        assert response.status_code == 404
+        assert response.json()["data"]["code"] == "TEMPLATE_NOT_FOUND"
+
+    # Y no se puede apuntar la plantilla propia a la cuenta de otro usuario.
+    own = await _create_template(client, headers_b, account_id=account_b)
+    stolen_account = await client.patch(
+        f"/v1/transaction-templates/{own}", json={"account_id": str(account_a)}, headers=headers_b
+    )
+    assert stolen_account.status_code == 404
+    assert stolen_account.json()["data"]["code"] == "ACCOUNT_NOT_FOUND"
+
+    untouched = await client.get(url, headers=headers_a)
+    assert untouched.json()["data"]["name"] == "Mío"

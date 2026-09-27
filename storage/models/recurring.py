@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date as date_
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -12,6 +13,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Numeric,
     String,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -37,6 +39,9 @@ class RecurringRule(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     amount_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="GTQ")
+    # Caso 4: congelada una sola vez al crear la regla — no editable después
+    # (no hay de dónde refrescarla al auto-generar, sin fuente de FX).
+    fx_rate: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
     frequency: Mapped[str] = mapped_column(String(10), nullable=False)
     interval: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     next_due_date: Mapped[date_] = mapped_column(Date, nullable=False)

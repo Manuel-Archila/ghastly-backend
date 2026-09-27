@@ -33,6 +33,7 @@ class UpcomingItemOut(BaseModel):
     name: str
     due_date: date
     amount_cents: int
+    currency: str
 
 
 class MonthAmountOut(BaseModel):

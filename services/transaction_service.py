@@ -323,6 +323,10 @@ async def refund(
         )
     amount = data.amount_cents or original.amount_cents
     account = await _get_owned_account(db, user_id, original.account_id)
+    refund_date = data.date or date_.today()
+    fx_rate, base_amount_cents = await _resolve_fx(
+        db, original.currency, amount, refund_date, data.fx_rate
+    )
 
     now = datetime.now(UTC)
     refund_txn = Transaction(
@@ -333,7 +337,9 @@ async def refund(
         kind="income",
         amount_cents=amount,
         currency=original.currency,
-        date=data.date or date_.today(),
+        fx_rate=fx_rate,
+        base_amount_cents=base_amount_cents,
+        date=refund_date,
         description=f"Reembolso: {original.description}" if original.description else "Reembolso",
         notes=data.notes,
         refund_of_id=original.id,
@@ -573,7 +579,13 @@ async def get_stats(
     category_id: UUID | None = None,
     date_from: date_ | None = None,
     date_to: date_ | None = None,
+    in_base_currency: bool = False,
 ) -> TransactionStats:
+    """`in_base_currency=True` suma el equivalente en GTQ (caso 4) en vez del
+    monto crudo — correcto para rollups que mezclan cuentas de distinta
+    moneda (dashboard, `/reports/comparison`). El default (`False`) es lo
+    que espera `GET /transactions/stats`: si filtrás por una cuenta en USD,
+    querés ver sus totales en USD, no convertidos."""
     stmt = select(Transaction).where(
         Transaction.user_id == user_id, Transaction.deleted_at.is_(None)
     )
@@ -589,8 +601,14 @@ async def get_stats(
 
     result = await db.execute(stmt)
     rows = list(result.scalars().all())
-    total_income = sum(r.amount_cents for r in rows if r.kind == "income")
-    total_expense = sum(r.amount_cents for r in rows if r.kind == "expense")
+
+    def _amount(r: Transaction) -> int:
+        if in_base_currency and r.base_amount_cents is not None:
+            return r.base_amount_cents
+        return r.amount_cents
+
+    total_income = sum(_amount(r) for r in rows if r.kind == "income")
+    total_expense = sum(_amount(r) for r in rows if r.kind == "expense")
     return TransactionStats(
         count=len(rows),
         total_income_cents=total_income,

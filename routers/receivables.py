@@ -9,7 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.idempotency import IDEMPOTENCY_KEY_HEADER, handle_idempotent_write
 from core.response import ApiResponse, ok
 from dependencies import get_current_user, get_db
-from schemas.receivables import ReceivableCreate, ReceivableOut, ReceivableSettle
+from schemas.receivables import (
+    ReceivableCreate,
+    ReceivableOut,
+    ReceivableSettle,
+    ReceivableUpdate,
+)
 from services import receivable_service
 from storage.models.user import User
 
@@ -43,6 +48,29 @@ async def get_receivable(
 ) -> ApiResponse[ReceivableOut]:
     receivable = await receivable_service.get_receivable(db, current_user.id, receivable_id)
     return ok(receivable_service.to_out(receivable))
+
+
+@router.patch("/{receivable_id}")
+async def update_receivable(
+    receivable_id: UUID,
+    payload: ReceivableUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiResponse[ReceivableOut]:
+    receivable = await receivable_service.update_receivable(
+        db, current_user.id, receivable_id, payload
+    )
+    return ok(receivable_service.to_out(receivable), "Gasto compartido actualizado.")
+
+
+@router.delete("/{receivable_id}")
+async def delete_receivable(
+    receivable_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiResponse[None]:
+    await receivable_service.delete_receivable(db, current_user.id, receivable_id)
+    return ok(None, "Gasto compartido eliminado.")
 
 
 @router.post("/{receivable_id}/settle", response_model=None)

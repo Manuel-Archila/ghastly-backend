@@ -7,6 +7,7 @@ from storage.models.debt import Debt, DebtPayment
 from storage.models.fx import FxRate
 from storage.models.goal import Goal, GoalContribution
 from storage.models.installment import Installment, InstallmentPlan
+from storage.models.notification import BudgetAlertSent, NotificationPreferences
 from storage.models.receivable import Receivable
 from storage.models.recurring import RecurringRule
 from storage.models.sync import ChangeLog, IdempotencyKey
@@ -40,4 +41,6 @@ __all__ = [
     "GoalContribution",
     "Receivable",
     "TransactionTemplate",
+    "BudgetAlertSent",
+    "NotificationPreferences",
 ]

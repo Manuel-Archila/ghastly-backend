@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from httpx import AsyncClient
 
@@ -12,6 +12,12 @@ def _idem() -> dict[str, str]:
 
 def _current_month() -> str:
     return datetime.now(UTC).strftime("%Y-%m")
+
+
+def _days_from_today(days: int) -> str:
+    """Fechas relativas a hoy: los tests de `upcoming` miran una ventana hacia
+    adelante, así que una fecha fija caduca sola."""
+    return (datetime.now(UTC).date() + timedelta(days=days)).isoformat()
 
 
 async def _create_transaction(
@@ -101,7 +107,7 @@ async def _create_installment_plan(
     description: str = "Laptop",
     total_amount_cents: int = 300_000,
     count: int = 3,
-    first_payment_date: str = "2026-09-15",
+    first_payment_date: str | None = None,
 ) -> uuid.UUID:
     plan_id = uuid.uuid4()
     installment_ids = [uuid.uuid4() for _ in range(count)]
@@ -113,7 +119,7 @@ async def _create_installment_plan(
             "description": description,
             "total_amount_cents": total_amount_cents,
             "installments_count": count,
-            "first_payment_date": first_payment_date,
+            "first_payment_date": first_payment_date or _days_from_today(5),
             "installment_ids": [str(i) for i in installment_ids],
         },
         headers=headers,
@@ -129,7 +135,7 @@ async def _create_recurring_rule(
     *,
     name: str = "Netflix",
     amount_cents: int = 8_900,
-    next_due_date: str = "2026-09-20",
+    next_due_date: str | None = None,
 ) -> uuid.UUID:
     rule_id = uuid.uuid4()
     response = await client.post(
@@ -141,7 +147,7 @@ async def _create_recurring_rule(
             "name": name,
             "amount_cents": amount_cents,
             "frequency": "monthly",
-            "next_due_date": next_due_date,
+            "next_due_date": next_due_date or _days_from_today(10),
             "auto_create": False,
         },
         headers=headers,
@@ -1285,8 +1291,10 @@ async def test_upcoming_includes_installments_and_recurring_sorted_by_date(
 ) -> None:
     headers = await register_and_login(client)
     account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
-    await _create_installment_plan(client, headers, account_id, first_payment_date="2026-09-15")
-    await _create_recurring_rule(client, headers, account_id, next_due_date="2026-09-20")
+    await _create_installment_plan(
+        client, headers, account_id, first_payment_date=_days_from_today(5)
+    )
+    await _create_recurring_rule(client, headers, account_id, next_due_date=_days_from_today(10))
 
     response = await client.get("/v1/reports/upcoming?days=30", headers=headers)
     assert response.status_code == 200, response.text
@@ -1342,7 +1350,7 @@ async def test_upcoming_includes_active_debt_monthly_payment(client: AsyncClient
 async def test_upcoming_excludes_items_beyond_days_window(client: AsyncClient) -> None:
     headers = await register_and_login(client)
     account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
-    await _create_recurring_rule(client, headers, account_id, next_due_date="2026-12-31")
+    await _create_recurring_rule(client, headers, account_id, next_due_date=_days_from_today(200))
 
     response = await client.get("/v1/reports/upcoming?days=7", headers=headers)
     assert response.json()["data"]["items"] == []
@@ -1360,7 +1368,7 @@ async def test_upcoming_isolated_from_other_users_data(client: AsyncClient) -> N
     headers_a = await register_and_login(client, email="upcoming-a@example.com")
     headers_b = await register_and_login(client, email="upcoming-b@example.com")
     account_a = await create_account(client, headers_a, initial_balance_cents=1_000_000)
-    await _create_recurring_rule(client, headers_a, account_a, next_due_date="2026-09-20")
+    await _create_recurring_rule(client, headers_a, account_a, next_due_date=_days_from_today(10))
 
     response_b = await client.get("/v1/reports/upcoming?days=30", headers=headers_b)
     assert response_b.json()["data"]["items"] == []

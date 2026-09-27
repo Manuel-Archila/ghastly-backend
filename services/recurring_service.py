@@ -15,8 +15,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.errors import ConflictError, NotFoundError
+from core.errors import ConflictError, NotFoundError, ValidationAppError
 from domain.balances import LedgerEntry, signed_delta
+from domain.money import Money
 from domain.recurrence import detect_price_increase, monthly_equivalent_cents, next_occurrence
 from schemas.recurring import (
     RecurringConfirmRequest,
@@ -46,6 +47,13 @@ async def create_rule(db: AsyncSession, user_id: UUID, data: RecurringRuleCreate
     if account is None or account.user_id != user_id or account.deleted_at is not None:
         raise NotFoundError("La cuenta no existe.", code="ACCOUNT_NOT_FOUND")
 
+    if data.currency != "GTQ" and data.fx_rate is None:
+        raise ValidationAppError(
+            "Una regla en moneda distinta de GTQ necesita fx_rate.",
+            field="fx_rate",
+            code="FX_RATE_REQUIRED",
+        )
+
     rule = RecurringRule(
         id=data.id,
         user_id=user_id,
@@ -55,6 +63,7 @@ async def create_rule(db: AsyncSession, user_id: UUID, data: RecurringRuleCreate
         name=data.name,
         amount_cents=data.amount_cents,
         currency=data.currency,
+        fx_rate=data.fx_rate if data.currency != "GTQ" else None,
         frequency=data.frequency,
         interval=data.interval,
         next_due_date=data.next_due_date,
@@ -165,6 +174,15 @@ async def confirm_rule(
     if account is None:
         raise NotFoundError("La cuenta no existe.", code="ACCOUNT_NOT_FOUND")
 
+    # Caso 4: la tasa ya se congeló al crear la regla (`create_rule`) — acá
+    # solo se convierte con esa tasa fija, nunca se recalcula ni se busca
+    # una más nueva (no hay de dónde, y tampoco correspondería).
+    base_amount_cents = (
+        Money(rule.amount_cents, rule.currency).convert(rule.fx_rate, "GTQ").cents  # type: ignore[arg-type]
+        if rule.currency != "GTQ"
+        else None
+    )
+
     now = datetime.now(UTC)
     transaction = Transaction(
         id=data.id,
@@ -174,6 +192,8 @@ async def confirm_rule(
         kind=rule.kind,
         amount_cents=rule.amount_cents,
         currency=rule.currency,
+        fx_rate=rule.fx_rate,
+        base_amount_cents=base_amount_cents,
         date=data.date or date_.today(),
         description=rule.name,
         recurring_rule_id=rule.id,

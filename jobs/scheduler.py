@@ -16,7 +16,6 @@ from jobs import (
     detect_anomalies,
     generate_recurring,
     purge_idempotency_keys,
-    refresh_fx_rates,
     send_due_reminders,
 )
 
@@ -51,9 +50,6 @@ def get_scheduler() -> AsyncIOScheduler:
         )
         scheduler.add_job(
             purge_idempotency_keys.run, CronTrigger(minute=0), id="purge_idempotency_keys"
-        )
-        scheduler.add_job(
-            refresh_fx_rates.run, CronTrigger(hour=7, minute=0), id="refresh_fx_rates"
         )
         _scheduler = scheduler
     return _scheduler

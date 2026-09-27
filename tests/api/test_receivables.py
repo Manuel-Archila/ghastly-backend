@@ -330,3 +330,129 @@ async def test_cannot_create_receivable_on_another_users_transaction(client: Asy
     )
     assert response.status_code == 404
     assert response.json()["data"]["code"] == "TRANSACTION_NOT_FOUND"
+
+
+async def test_update_receivable_changes_counterparty_and_amount(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
+    expense_id = await _create_expense(client, headers, account_id, 200_000)
+    receivable_id = await _create_receivable(
+        client, headers, transaction_id=expense_id, amount_cents=100_000
+    )
+
+    response = await client.patch(
+        f"/v1/receivables/{receivable_id}",
+        json={"counterparty": "Ana María", "amount_cents": 150_000},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["counterparty"] == "Ana María"
+    assert response.json()["data"]["amount_cents"] == 150_000
+
+    # Sigue contando en "por cobrar" con el monto nuevo.
+    dashboard = await client.get("/v1/reports/dashboard", headers=headers)
+    assert dashboard.json()["data"]["receivable_cents"] == 150_000
+
+
+async def test_update_receivable_respects_the_sum_across_people(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
+    expense_id = await _create_expense(client, headers, account_id, 200_000)
+    ana = await _create_receivable(client, headers, transaction_id=expense_id, amount_cents=100_000)
+    await _create_receivable(
+        client, headers, transaction_id=expense_id, amount_cents=80_000, counterparty="Luis"
+    )
+
+    too_much = await client.patch(
+        f"/v1/receivables/{ana}", json={"amount_cents": 130_000}, headers=headers
+    )
+    assert too_much.status_code == 422
+    assert too_much.json()["data"]["code"] == "RECEIVABLE_EXCEEDS_TRANSACTION_AMOUNT"
+
+    # Su propio monto actual no cuenta contra sí mismo.
+    fits = await client.patch(
+        f"/v1/receivables/{ana}", json={"amount_cents": 120_000}, headers=headers
+    )
+    assert fits.status_code == 200
+
+    null_amount = await client.patch(
+        f"/v1/receivables/{ana}", json={"amount_cents": None}, headers=headers
+    )
+    assert null_amount.status_code == 422
+
+
+async def test_delete_receivable_frees_the_amount_and_hides_it(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
+    expense_id = await _create_expense(client, headers, account_id, 200_000)
+    receivable_id = await _create_receivable(
+        client, headers, transaction_id=expense_id, amount_cents=200_000
+    )
+
+    response = await client.delete(f"/v1/receivables/{receivable_id}", headers=headers)
+    assert response.status_code == 200, response.text
+
+    assert (
+        await client.get(f"/v1/receivables/{receivable_id}", headers=headers)
+    ).status_code == 404
+    assert (await client.get("/v1/receivables", headers=headers)).json()["data"] == []
+    dashboard = await client.get("/v1/reports/dashboard", headers=headers)
+    assert dashboard.json()["data"]["receivable_cents"] == 0
+
+    # El cupo del gasto quedó libre otra vez.
+    await _create_receivable(client, headers, transaction_id=expense_id, amount_cents=200_000)
+
+    pull = await client.get("/v1/sync/pull?since=0", headers=headers)
+    ops = [
+        c["op"]
+        for c in pull.json()["data"]["changes"]
+        if c["entity_type"] == "receivable" and c["entity_id"] == str(receivable_id)
+    ]
+    assert ops == ["upsert", "delete"]
+
+
+async def test_settled_receivable_cannot_be_edited_or_deleted(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
+    expense_id = await _create_expense(client, headers, account_id, 200_000)
+    receivable_id = await _create_receivable(
+        client, headers, transaction_id=expense_id, amount_cents=100_000
+    )
+    await client.post(
+        f"/v1/receivables/{receivable_id}/settle",
+        json={
+            "id": str(uuid.uuid4()),
+            "account_id": str(account_id),
+            "date": f"{_current_month()}-10",
+        },
+        headers={**headers, **_idem()},
+    )
+
+    patched = await client.patch(
+        f"/v1/receivables/{receivable_id}", json={"counterparty": "Otro"}, headers=headers
+    )
+    deleted = await client.delete(f"/v1/receivables/{receivable_id}", headers=headers)
+    for response in (patched, deleted):
+        assert response.status_code == 409
+        assert response.json()["data"]["code"] == "RECEIVABLE_ALREADY_SETTLED"
+
+
+async def test_cross_user_cannot_edit_or_delete_receivable(client: AsyncClient) -> None:
+    headers_a = await register_and_login(client, email="receivable-a@example.com")
+    headers_b = await register_and_login(client, email="receivable-b@example.com")
+    account_a = await create_account(client, headers_a, initial_balance_cents=1_000_000)
+    expense_id = await _create_expense(client, headers_a, account_a, 200_000)
+    receivable_id = await _create_receivable(
+        client, headers_a, transaction_id=expense_id, amount_cents=100_000
+    )
+
+    patched = await client.patch(
+        f"/v1/receivables/{receivable_id}", json={"counterparty": "X"}, headers=headers_b
+    )
+    deleted = await client.delete(f"/v1/receivables/{receivable_id}", headers=headers_b)
+    for response in (patched, deleted):
+        assert response.status_code == 404
+        assert response.json()["data"]["code"] == "RECEIVABLE_NOT_FOUND"
+
+    still_there = await client.get(f"/v1/receivables/{receivable_id}", headers=headers_a)
+    assert still_there.json()["data"]["counterparty"] == "Ana"

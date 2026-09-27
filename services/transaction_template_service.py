@@ -18,7 +18,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.errors import ConflictError, NotFoundError, ValidationAppError
-from schemas.transaction_templates import TransactionTemplateCreate, TransactionTemplateOut
+from schemas.transaction_templates import (
+    TransactionTemplateCreate,
+    TransactionTemplateOut,
+    TransactionTemplateUpdate,
+)
 from services.change_log import record_change
 from storage.models.account import Account
 from storage.models.category import Category
@@ -32,23 +36,32 @@ async def _get_owned(db: AsyncSession, user_id: UUID, template_id: UUID) -> Tran
     return template
 
 
-async def create_template(
-    db: AsyncSession, user_id: UUID, data: TransactionTemplateCreate
-) -> TransactionTemplate:
-    account = await db.get(Account, data.account_id)
+async def _require_account(db: AsyncSession, user_id: UUID, account_id: UUID) -> None:
+    account = await db.get(Account, account_id)
     if account is None or account.user_id != user_id or account.deleted_at is not None:
         raise NotFoundError("La cuenta no existe.", code="ACCOUNT_NOT_FOUND")
 
+
+async def _require_category_for_kind(
+    db: AsyncSession, user_id: UUID, category_id: UUID, kind: str
+) -> None:
+    category = await db.get(Category, category_id)
+    if category is None or category.user_id != user_id or category.deleted_at is not None:
+        raise NotFoundError("La categoría no existe.", code="CATEGORY_NOT_FOUND")
+    if category.kind != kind:
+        raise ValidationAppError(
+            "La categoría no coincide con el tipo de movimiento (ingreso/gasto).",
+            field="category_id",
+            code="CATEGORY_KIND_MISMATCH",
+        )
+
+
+async def create_template(
+    db: AsyncSession, user_id: UUID, data: TransactionTemplateCreate
+) -> TransactionTemplate:
+    await _require_account(db, user_id, data.account_id)
     if data.category_id is not None:
-        category = await db.get(Category, data.category_id)
-        if category is None or category.user_id != user_id or category.deleted_at is not None:
-            raise NotFoundError("La categoría no existe.", code="CATEGORY_NOT_FOUND")
-        if category.kind != data.kind:
-            raise ValidationAppError(
-                "La categoría no coincide con el tipo de movimiento (ingreso/gasto).",
-                field="category_id",
-                code="CATEGORY_KIND_MISMATCH",
-            )
+        await _require_category_for_kind(db, user_id, data.category_id, data.kind)
 
     template = TransactionTemplate(
         id=data.id,
@@ -95,6 +108,42 @@ async def list_templates(db: AsyncSession, user_id: UUID) -> list[TransactionTem
         )
     )
     return list(result.scalars().all())
+
+
+async def get_template(db: AsyncSession, user_id: UUID, template_id: UUID) -> TransactionTemplate:
+    return await _get_owned(db, user_id, template_id)
+
+
+async def update_template(
+    db: AsyncSession, user_id: UUID, template_id: UUID, data: TransactionTemplateUpdate
+) -> TransactionTemplate:
+    template = await _get_owned(db, user_id, template_id)
+    changes = data.model_dump(exclude_unset=True)
+
+    if "account_id" in changes:
+        await _require_account(db, user_id, changes["account_id"])
+
+    # Cambiar el tipo también obliga a revisar la categoría que ya tenía.
+    new_kind = changes.get("kind", template.kind)
+    new_category_id = changes.get("category_id", template.category_id)
+    if new_category_id is not None and ("category_id" in changes or "kind" in changes):
+        await _require_category_for_kind(db, user_id, new_category_id, new_kind)
+
+    for field, value in changes.items():
+        setattr(template, field, value)
+    template.updated_at = datetime.now(UTC)
+    await db.flush()
+    await record_change(
+        db,
+        user_id=user_id,
+        entity_type="transaction_template",
+        op="upsert",
+        entity=template,
+        payload=TransactionTemplateOut.model_validate(template).model_dump(mode="json"),
+    )
+    await db.commit()
+    await db.refresh(template)
+    return template
 
 
 async def delete_template(db: AsyncSession, user_id: UUID, template_id: UUID) -> None:

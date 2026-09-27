@@ -440,7 +440,6 @@ Corren con `APScheduler` en el proceso, a la hora de Guatemala. Cada job es **id
 | `detect_anomalies` | día 1, 06:00 | Compara contra el promedio de 3 meses |
 | `card_cycle_notices` | diario | Aviso de corte y de fecha de pago |
 | `purge_idempotency_keys` | horario | TTL 24 h |
-| `refresh_fx_rates` | 07:00 diario | Si hay fuente configurada; si no, no-op |
 
 ---
 

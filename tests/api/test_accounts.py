@@ -283,3 +283,31 @@ async def test_cross_user_cannot_read_statement(client: AsyncClient) -> None:
     response = await client.get(f"/v1/accounts/{account_id}/statement", headers=headers_b)
     assert response.status_code == 404
     assert response.json()["data"]["code"] == "ACCOUNT_NOT_FOUND"
+
+
+async def test_patch_rejects_explicit_null_on_required_field(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, name="Original")
+
+    response = await client.patch(
+        f"/v1/accounts/{account_id}", json={"name": None}, headers=headers
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["data"]["code"] == "VALIDATION_ERROR"
+    assert body["data"]["errors"][0]["loc"] == ["body", "name"]
+
+    unchanged = await client.get(f"/v1/accounts/{account_id}", headers=headers)
+    assert unchanged.json()["data"]["name"] == "Original"
+
+
+async def test_patch_allows_explicit_null_on_nullable_field(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers)
+    await client.patch(f"/v1/accounts/{account_id}", json={"institution": "BAM"}, headers=headers)
+
+    response = await client.patch(
+        f"/v1/accounts/{account_id}", json={"institution": None}, headers=headers
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["institution"] is None

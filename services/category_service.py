@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.errors import ConflictError, NotFoundError, ValidationAppError
 from domain.categories import CategoryError, validate_category_depth
 from schemas.categories import CategoryCreate, CategoryOut, CategoryTreeOut, CategoryUpdate
+from services import budget_service
 from services.change_log import record_change
 from storage.models.category import Category
 from storage.models.transaction import Transaction
@@ -175,6 +176,7 @@ async def archive_category(db: AsyncSession, user_id: UUID, category_id: UUID) -
     category.is_archived = True
     category.updated_at = datetime.now(UTC)
     await db.flush()
+    await budget_service.retire_category_items(db, user_id, category.id)
     await record_change(
         db,
         user_id=user_id,
@@ -209,6 +211,7 @@ async def merge_categories(
     source.is_archived = True
     source.updated_at = datetime.now(UTC)
     await db.flush()
+    await budget_service.retire_category_items(db, user_id, source.id, merge_into=target.id)
     await record_change(
         db,
         user_id=user_id,

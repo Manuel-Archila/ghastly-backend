@@ -3,9 +3,9 @@ que acaba de cerrar, contra el promedio de los 3 anteriores (PLAN-backend.md
 §9). La detección vive en `domain/anomalies.py` — es la misma lógica que usa
 GET /reports/anomalies on-demand, acá corrida para todos los usuarios.
 
-Mismo estado que los demás avisos: se deja el rastro en logs, no hay entrega
-push real todavía (Fase 5). Sin PII en logs (CLAUDE.md): se registra el id
-de categoría y el % de aumento, nunca los montos."""
+Sin PII en logs (CLAUDE.md): se registra el id de categoría y el % de
+aumento, nunca los montos — el push sí lleva el nombre de la categoría
+(igual que cualquier notificación en el propio teléfono del usuario)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import structlog
 from sqlalchemy import select
 
 from core.timezone import today_in_business_tz
-from services import report_service
+from services import push_service, report_service
 from storage.db import get_session_factory
 from storage.models.user import User
 
@@ -51,5 +51,9 @@ async def run() -> None:
                     percent_increase=item.percent_increase,
                 )
                 anomalies_found += 1
+                await push_service.notify_spending_anomaly(
+                    db, user_id, item.category_name, item.percent_increase
+                )
+        await db.commit()
 
     logger.info("detect_anomalies_done", users=len(user_ids), anomalies=anomalies_found)

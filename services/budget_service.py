@@ -11,11 +11,12 @@ vez de recalcular — editar una transacción vieja no reescribe la historia
 from __future__ import annotations
 
 import calendar
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
 
 import structlog
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,9 +25,12 @@ from core.timezone import today_in_business_tz
 from domain.budget import (
     compute_item_progress,
     compute_rollover_out,
+    effective_parents,
     expected_income,
     project_period_end,
+    rollup_spent,
     suggested_daily_pace,
+    summarize_hierarchy,
 )
 from schemas.budgets import (
     BudgetCreate,
@@ -34,13 +38,16 @@ from schemas.budgets import (
     BudgetHistoryOut,
     BudgetHistoryPeriodOut,
     BudgetItemCreate,
+    BudgetItemOut,
     BudgetItemUpdate,
     BudgetOut,
     BudgetUpdate,
+    BudgetWarningOut,
     CategoryProgressOut,
     ClosePeriodResult,
     UnbudgetedCategoryOut,
 )
+from services import notification_preferences_service, push_service
 from services.change_log import record_change
 from services.query_filters import exclude_transfers
 from storage.models.budget import Budget, BudgetItem, BudgetPeriod, BudgetPeriodItem
@@ -115,7 +122,47 @@ async def _get_owned_category(db: AsyncSession, user_id: UUID, category_id: UUID
 # CRUD de presupuestos e ítems
 
 
+async def _require_budgetable_category(
+    db: AsyncSession, user_id: UUID, category_id: UUID
+) -> Category:
+    category = await _get_owned_category(db, user_id, category_id)
+    if category.kind != "expense":
+        raise ValidationAppError(
+            "Solo se presupuestan categorías de gasto.",
+            code="BUDGET_REQUIRES_EXPENSE_CATEGORY",
+        )
+    return category
+
+
+async def _require_category_free(
+    db: AsyncSession,
+    budget_id: UUID,
+    category_id: UUID,
+    *,
+    except_item_id: UUID | None = None,
+) -> None:
+    stmt = select(BudgetItem.id).where(
+        BudgetItem.budget_id == budget_id,
+        BudgetItem.category_id == category_id,
+        BudgetItem.deleted_at.is_(None),
+    )
+    if except_item_id is not None:
+        stmt = stmt.where(BudgetItem.id != except_item_id)
+    if (await db.execute(stmt)).first() is not None:
+        raise ConflictError(
+            "Esa categoría ya está en el presupuesto.", code="BUDGET_ITEM_CATEGORY_TAKEN"
+        )
+
+
 async def create_budget(db: AsyncSession, user_id: UUID, data: BudgetCreate) -> Budget:
+    category_ids = [item.category_id for item in data.items]
+    if len(set(category_ids)) != len(category_ids):
+        raise ValidationAppError(
+            "Una categoría solo puede aparecer una vez en el presupuesto.",
+            field="items",
+            code="BUDGET_ITEM_CATEGORY_TAKEN",
+        )
+
     budget = Budget(
         id=data.id,
         user_id=user_id,
@@ -153,12 +200,7 @@ async def create_budget(db: AsyncSession, user_id: UUID, data: BudgetCreate) -> 
 async def _add_item(
     db: AsyncSession, user_id: UUID, budget: Budget, item_data: BudgetItemCreate
 ) -> BudgetItem:
-    category = await _get_owned_category(db, user_id, item_data.category_id)
-    if category.kind != "expense":
-        raise ValidationAppError(
-            "Solo se presupuestan categorías de gasto.",
-            code="BUDGET_REQUIRES_EXPENSE_CATEGORY",
-        )
+    await _require_budgetable_category(db, user_id, item_data.category_id)
     item = BudgetItem(
         id=item_data.id,
         user_id=user_id,
@@ -176,11 +218,144 @@ async def add_item(
     db: AsyncSession, user_id: UUID, budget_id: UUID, data: BudgetItemCreate
 ) -> BudgetItem:
     budget = await _get_owned(db, user_id, budget_id)
+    await _require_category_free(db, budget.id, data.category_id)
     item = await _add_item(db, user_id, budget, data)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ConflictError(
+            "Ya existe un ítem con ese id o para esa categoría.", code="BUDGET_ITEM_ID_TAKEN"
+        ) from exc
+    await _record_item_change(db, user_id, item, op="upsert")
     await db.commit()
     await db.refresh(item)
     return item
+
+
+async def _record_item_change(
+    db: AsyncSession, user_id: UUID, item: BudgetItem, *, op: str
+) -> None:
+    await record_change(
+        db,
+        user_id=user_id,
+        entity_type="budget_item",
+        op=op,  # type: ignore[arg-type]
+        entity=item,
+        payload=(
+            BudgetItemOut.model_validate(item).model_dump(mode="json")
+            if op == "upsert"
+            else {"id": str(item.id), "budget_id": str(item.budget_id)}
+        ),
+    )
+
+
+async def list_items(db: AsyncSession, user_id: UUID, budget_id: UUID) -> list[BudgetItem]:
+    budget = await _get_owned(db, user_id, budget_id)
+    result = await db.execute(
+        select(BudgetItem)
+        .where(BudgetItem.budget_id == budget.id, BudgetItem.deleted_at.is_(None))
+        .order_by(BudgetItem.sort_order, BudgetItem.created_at)
+    )
+    return list(result.scalars().all())
+
+
+async def get_item(db: AsyncSession, user_id: UUID, budget_id: UUID, item_id: UUID) -> BudgetItem:
+    return await _get_owned_item(db, user_id, budget_id, item_id)
+
+
+async def delete_item(db: AsyncSession, user_id: UUID, budget_id: UUID, item_id: UUID) -> None:
+    """Quita la categoría del presupuesto. Los gastos ya registrados no se tocan;
+    si la categoría tenía subcategorías presupuestadas, esas pasan a ser raíces."""
+    item = await _get_owned_item(db, user_id, budget_id, item_id)
+    now = datetime.now(UTC)
+    item.deleted_at = now
+    item.updated_at = now
+    await db.flush()
+    await _record_item_change(db, user_id, item, op="delete")
+    await db.commit()
+
+
+async def retire_category_items(
+    db: AsyncSession, user_id: UUID, category_id: UUID, *, merge_into: UUID | None = None
+) -> None:
+    """Un ítem no puede quedar apuntando a una categoría archivada: el cliente ya
+    no la lista, así que seguiría sumando al total sin poder editarse.
+
+    Archivar quita el ítem. Fusionar en `merge_into` suma el monto al ítem de la
+    categoría destino (o, si el presupuesto no la tenía, el ítem se muda a ella).
+    No commitea: lo llama `category_service` dentro de su misma transacción."""
+    result = await db.execute(
+        select(BudgetItem).where(
+            BudgetItem.user_id == user_id,
+            BudgetItem.category_id == category_id,
+            BudgetItem.deleted_at.is_(None),
+        )
+    )
+    now = datetime.now(UTC)
+    for item in result.scalars().all():
+        if merge_into is not None:
+            target_result = await db.execute(
+                select(BudgetItem).where(
+                    BudgetItem.budget_id == item.budget_id,
+                    BudgetItem.category_id == merge_into,
+                    BudgetItem.deleted_at.is_(None),
+                )
+            )
+            target = target_result.scalar_one_or_none()
+            if target is None:
+                item.category_id = merge_into
+                item.updated_at = now
+                await db.flush()
+                await _record_item_change(db, user_id, item, op="upsert")
+                continue
+            target.amount_cents += item.amount_cents
+            target.updated_at = now
+            await db.flush()
+            await _record_item_change(db, user_id, target, op="upsert")
+
+        item.deleted_at = now
+        item.updated_at = now
+        await db.flush()
+        await _record_item_change(db, user_id, item, op="delete")
+
+
+async def hierarchy_warning(
+    db: AsyncSession, user_id: UUID, item: BudgetItem
+) -> BudgetWarningOut | None:
+    """Advertencia si los ítems hijos de la familia de `item` suman más que el
+    tope del ítem padre. Sirve tanto si `item` es el padre como si es un hijo."""
+    rows = (
+        await db.execute(
+            select(
+                BudgetItem.id, BudgetItem.category_id, BudgetItem.amount_cents, Category.parent_id
+            )
+            .join(Category, Category.id == BudgetItem.category_id)
+            .where(
+                BudgetItem.user_id == user_id,
+                BudgetItem.budget_id == item.budget_id,
+                BudgetItem.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    budgeted = {r.category_id: r.amount_cents for r in rows}
+    item_id_by_category = {r.category_id: r.id for r in rows}
+    parents = effective_parents({r.category_id: r.parent_id for r in rows})
+
+    root = parents.get(item.category_id) or item.category_id
+    summary = summarize_hierarchy(budgeted, parents)
+    excess = summary.children_excess.get(root)
+    if excess is None:
+        return None
+    return BudgetWarningOut(
+        code="CHILDREN_EXCEED_PARENT",
+        message="Las subcategorías presupuestadas suman más que el tope de la categoría padre.",
+        parent_item_id=item_id_by_category[root],
+        parent_category_id=root,
+        parent_cents=budgeted[root],
+        children_cents=summary.children_budgeted[root],
+        excess_cents=excess,
+    )
 
 
 async def list_budgets(db: AsyncSession, user_id: UUID) -> list[Budget]:
@@ -235,9 +410,24 @@ async def update_item(
     db: AsyncSession, user_id: UUID, budget_id: UUID, item_id: UUID, data: BudgetItemUpdate
 ) -> BudgetItem:
     item = await _get_owned_item(db, user_id, budget_id, item_id)
-    for field, value in data.model_dump(exclude_unset=True).items():
+    changes = data.model_dump(exclude_unset=True)
+
+    new_category_id = changes.get("category_id")
+    if new_category_id is not None and new_category_id != item.category_id:
+        await _require_budgetable_category(db, user_id, new_category_id)
+        await _require_category_free(db, budget_id, new_category_id, except_item_id=item.id)
+
+    for field, value in changes.items():
         setattr(item, field, value)
     item.updated_at = datetime.now(UTC)
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ConflictError(
+            "Esa categoría ya está en el presupuesto.", code="BUDGET_ITEM_CATEGORY_TAKEN"
+        ) from exc
+    await _record_item_change(db, user_id, item, op="upsert")
     await db.commit()
     await db.refresh(item)
     return item
@@ -249,8 +439,9 @@ async def update_item(
 
 async def income_for_month(db: AsyncSession, user_id: UUID, month: str) -> int:
     period_start, period_end = _month_bounds(month)
+    amount_expr = func.coalesce(Transaction.base_amount_cents, Transaction.amount_cents)
     stmt = exclude_transfers(
-        select(func.coalesce(func.sum(Transaction.amount_cents), 0)).where(
+        select(func.coalesce(func.sum(amount_expr), 0)).where(
             Transaction.user_id == user_id,
             Transaction.kind == "income",
             Transaction.deleted_at.is_(None),
@@ -261,16 +452,46 @@ async def income_for_month(db: AsyncSession, user_id: UUID, month: str) -> int:
     return int((await db.execute(stmt)).scalar_one())
 
 
+async def income_by_month(db: AsyncSession, user_id: UUID, months: list[str]) -> dict[str, int]:
+    """Ingreso por mes para varios meses en una sola query (mismo criterio que
+    `income_for_month`). Los meses sin ingresos no aparecen en el dict."""
+    range_start, _ = _month_bounds(min(months))
+    _, range_end = _month_bounds(max(months))
+    month_expr = func.to_char(Transaction.date, "YYYY-MM")
+    stmt = exclude_transfers(
+        select(
+            month_expr,
+            func.coalesce(
+                func.sum(func.coalesce(Transaction.base_amount_cents, Transaction.amount_cents)), 0
+            ),
+        )
+        .where(
+            Transaction.user_id == user_id,
+            Transaction.kind == "income",
+            Transaction.deleted_at.is_(None),
+            Transaction.date >= range_start,
+            Transaction.date <= range_end,
+        )
+        .group_by(month_expr)
+    )
+    return {month: int(total) for month, total in (await db.execute(stmt)).all()}
+
+
 async def _compute_expected_income(
     db: AsyncSession, user_id: UUID, budget: Budget, month: str
 ) -> int:
     previous_month = _previous_month_str(month)
-    previous_month_income = await income_for_month(db, user_id, previous_month)
+    previous_month_income = 0
+    avg_3m_income = 0
 
-    months = [previous_month]
-    for _ in range(2):
-        months.append(_previous_month_str(months[-1]))
-    avg_3m_income = sum([await income_for_month(db, user_id, m) for m in months]) // 3
+    # Con base "fixed" no se consulta nada: `expected_income` ignora ambos.
+    if budget.income_basis != "fixed":
+        months = [previous_month]
+        for _ in range(2):
+            months.append(_previous_month_str(months[-1]))
+        by_month = await income_by_month(db, user_id, months)
+        previous_month_income = by_month.get(previous_month, 0)
+        avg_3m_income = sum(by_month.get(m, 0) for m in months) // 3
 
     return expected_income(
         budget.income_basis,  # type: ignore[arg-type]
@@ -286,23 +507,35 @@ async def _compute_expected_income(
 # Un reembolso (caso de negocio 5) es una transacción `income` con
 # `refund_of_id`: RESTA del gasto de su categoría original, nunca suma a
 # ingresos. Todo cálculo de consumo suma gastos y resta reembolsos.
+#
+# `base_amount_cents` (caso 4) es el equivalente en GTQ ya congelado al
+# crear la transacción — coalesce a `amount_cents` porque en GTQ vale lo
+# mismo (`_resolve_fx` lo deja igual, nunca null ahí); solo transferencias,
+# reembolsos y confirmaciones de recurrentes pueden dejarlo null, y esas
+# tres rutas ya lo resuelven (services/transaction_service.py,
+# services/recurring_service.py).
 _spend_or_refund = or_(
     Transaction.kind == "expense",
     Transaction.refund_of_id.is_not(None),
 )
+_amount_in_gtq = func.coalesce(Transaction.base_amount_cents, Transaction.amount_cents)
 _signed_spend = case(
-    (Transaction.refund_of_id.is_not(None), -Transaction.amount_cents),
-    else_=Transaction.amount_cents,
+    (Transaction.refund_of_id.is_not(None), -_amount_in_gtq),
+    else_=_amount_in_gtq,
 )
 
 
-async def _spent_for_category(
-    db: AsyncSession, user_id: UUID, category_id: UUID, period_start: date, period_end: date
+async def _spent_for_categories(
+    db: AsyncSession,
+    user_id: UUID,
+    category_ids: list[UUID],
+    period_start: date,
+    period_end: date,
 ) -> int:
     stmt = exclude_transfers(
         select(func.coalesce(func.sum(_signed_spend), 0)).where(
             Transaction.user_id == user_id,
-            Transaction.category_id == category_id,
+            Transaction.category_id.in_(category_ids),
             _spend_or_refund,
             Transaction.deleted_at.is_(None),
             Transaction.date >= period_start,
@@ -310,6 +543,74 @@ async def _spent_for_category(
         )
     )
     return int((await db.execute(stmt)).scalar_one())
+
+
+async def _spent_by_category(
+    db: AsyncSession, user_id: UUID, period_start: date, period_end: date
+) -> dict[UUID | None, int]:
+    """Consumo neto de TODAS las categorías en una query. La clave `None`
+    agrupa lo que no tiene categoría: entra al total del mes pero no a
+    ningún ítem."""
+    stmt = exclude_transfers(
+        select(Transaction.category_id, func.sum(_signed_spend))
+        .where(
+            Transaction.user_id == user_id,
+            _spend_or_refund,
+            Transaction.deleted_at.is_(None),
+            Transaction.date >= period_start,
+            Transaction.date <= period_end,
+        )
+        .group_by(Transaction.category_id)
+    )
+    return {cid: int(total) for cid, total in (await db.execute(stmt)).all()}
+
+
+@dataclass(frozen=True, slots=True)
+class _CategoryGraph:
+    """Nombre y padre de un conjunto de categorías, más los hijos de cada una.
+    Se carga en UNA query: la jerarquía es de dos niveles (`domain/categories.py`)."""
+
+    names: dict[UUID, str]
+    parent_of: dict[UUID, UUID | None]
+    children_of: dict[UUID, list[UUID]]
+
+
+async def _category_graph(
+    db: AsyncSession, user_id: UUID, category_ids: set[UUID]
+) -> _CategoryGraph:
+    if not category_ids:
+        return _CategoryGraph({}, {}, {})
+    result = await db.execute(
+        select(Category.id, Category.name, Category.parent_id).where(
+            Category.user_id == user_id,
+            or_(Category.id.in_(category_ids), Category.parent_id.in_(category_ids)),
+        )
+    )
+    names: dict[UUID, str] = {}
+    parent_of: dict[UUID, UUID | None] = {}
+    children_of: dict[UUID, list[UUID]] = {}
+    for cid, name, parent_id in result.all():
+        names[cid] = name
+        parent_of[cid] = parent_id
+        if parent_id is not None:
+            children_of.setdefault(parent_id, []).append(cid)
+    return _CategoryGraph(names, parent_of, children_of)
+
+
+def _link_hierarchy(
+    progresses: list[CategoryProgressOut], parent_of: dict[UUID, UUID | None]
+) -> int:
+    """Llena `parent_category_id` / `children_*` de cada progreso y devuelve el
+    total presupuestado, que cuenta solo los ítems raíz (los hijos son un reparto
+    dentro del tope del padre)."""
+    budgeted = {p.category_id: p.budgeted_cents for p in progresses}
+    links = effective_parents({cid: parent_of.get(cid) for cid in budgeted})
+    summary = summarize_hierarchy(budgeted, links)
+    for progress in progresses:
+        progress.parent_category_id = links[progress.category_id]
+        progress.children_budgeted_cents = summary.children_budgeted.get(progress.category_id, 0)
+        progress.children_excess_cents = summary.children_excess.get(progress.category_id, 0)
+    return summary.root_total_cents
 
 
 async def _rollover_in_by_category(
@@ -332,13 +633,16 @@ async def _rollover_in_by_category(
 
 async def _compute_live_progress(
     db: AsyncSession,
-    user_id: UUID,
     items: list[BudgetItem],
     month: str,
     period_start: date,
     period_end: date,
+    spent_by_category: dict[UUID | None, int],
+    graph: _CategoryGraph,
 ) -> tuple[list[CategoryProgressOut], int, int, int]:
-    """Devuelve (progresos, total_presupuestado, días_transcurridos, días_totales)."""
+    """Devuelve (progresos, total_presupuestado, días_transcurridos, días_totales).
+
+    El consumo de un ítem incluye a las subcategorías de su categoría."""
     days_elapsed, days_total = _days_elapsed_and_total(period_start, period_end)
     days_remaining = max(0, days_total - days_elapsed)
     rollover_in_by_category = (
@@ -346,11 +650,9 @@ async def _compute_live_progress(
     )
 
     progresses: list[CategoryProgressOut] = []
-    total_budgeted = 0
     for item in items:
-        category = await db.get(Category, item.category_id)
-        spent_cents = await _spent_for_category(
-            db, user_id, item.category_id, period_start, period_end
+        spent_cents = rollup_spent(
+            item.category_id, graph.children_of.get(item.category_id, []), spent_by_category
         )
         rollover_in = rollover_in_by_category.get(item.category_id, 0)
 
@@ -363,7 +665,7 @@ async def _compute_live_progress(
         progresses.append(
             CategoryProgressOut(
                 category_id=item.category_id,
-                category_name=category.name if category else "",
+                category_name=graph.names.get(item.category_id, ""),
                 budgeted_cents=progress.budgeted_cents,
                 rollover_in_cents=progress.rollover_in_cents,
                 spent_cents=progress.spent_cents,
@@ -373,8 +675,8 @@ async def _compute_live_progress(
                 suggested_daily_pace_cents=pace,
             )
         )
-        total_budgeted += item.amount_cents
 
+    total_budgeted = _link_hierarchy(progresses, graph.parent_of)
     return progresses, total_budgeted, days_elapsed, days_total
 
 
@@ -401,15 +703,19 @@ def _frozen_progress(item: BudgetPeriodItem, category_name: str) -> CategoryProg
 # El endpoint más usado del catálogo
 
 
-async def get_current(
-    db: AsyncSession, user_id: UUID, month: str | None = None
-) -> BudgetCurrentOut:
+async def _get_active_budget(db: AsyncSession, user_id: UUID) -> Budget | None:
     result = await db.execute(
         select(Budget).where(
             Budget.user_id == user_id, Budget.is_active.is_(True), Budget.deleted_at.is_(None)
         )
     )
-    budget = result.scalar_one_or_none()
+    return result.scalar_one_or_none()
+
+
+async def get_current(
+    db: AsyncSession, user_id: UUID, month: str | None = None
+) -> BudgetCurrentOut:
+    budget = await _get_active_budget(db, user_id)
     if budget is None:
         raise NotFoundError("No hay un presupuesto activo.", code="NO_ACTIVE_BUDGET")
 
@@ -426,11 +732,11 @@ async def get_current(
             select(BudgetPeriodItem).where(BudgetPeriodItem.budget_period_id == closed_period.id)
         )
         frozen_items = list(period_items_result.scalars().all())
-        progresses = []
-        for frozen in frozen_items:
-            category = await db.get(Category, frozen.category_id)
-            progresses.append(_frozen_progress(frozen, category.name if category else ""))
-        total_budgeted = sum(i.budgeted_cents for i in frozen_items)
+        frozen_graph = await _category_graph(db, user_id, {f.category_id for f in frozen_items})
+        progresses = [
+            _frozen_progress(f, frozen_graph.names.get(f.category_id, "")) for f in frozen_items
+        ]
+        total_budgeted = _link_hierarchy(progresses, frozen_graph.parent_of)
         total_spent = sum(i.spent_cents for i in frozen_items)
         return BudgetCurrentOut(
             month=month,
@@ -451,47 +757,36 @@ async def get_current(
         .order_by(BudgetItem.sort_order)
     )
     items = list(items_result.scalars().all())
-    progresses, total_budgeted, days_elapsed, days_total = await _compute_live_progress(
-        db, user_id, items, month, period_start, period_end
-    )
-
-    total_spent_stmt = exclude_transfers(
-        select(func.coalesce(func.sum(_signed_spend), 0)).where(
-            Transaction.user_id == user_id,
-            _spend_or_refund,
-            Transaction.deleted_at.is_(None),
-            Transaction.date >= period_start,
-            Transaction.date <= period_end,
-        )
-    )
-    total_spent = (await db.execute(total_spent_stmt)).scalar_one()
-
+    spent_by_category = await _spent_by_category(db, user_id, period_start, period_end)
     budgeted_category_ids = {item.category_id for item in items}
-    unbudgeted_stmt = exclude_transfers(
-        select(Transaction.category_id, func.sum(_signed_spend))
-        .where(
-            Transaction.user_id == user_id,
-            _spend_or_refund,
-            Transaction.deleted_at.is_(None),
-            Transaction.category_id.is_not(None),
-            Transaction.date >= period_start,
-            Transaction.date <= period_end,
-        )
-        .group_by(Transaction.category_id)
+    graph = await _category_graph(
+        db, user_id, budgeted_category_ids | {c for c in spent_by_category if c is not None}
     )
-    unbudgeted_rows = (await db.execute(unbudgeted_stmt)).all()
-    unbudgeted: list[UnbudgetedCategoryOut] = []
-    for category_id, spent in unbudgeted_rows:
-        if category_id in budgeted_category_ids or spent <= 0:
-            continue
-        category = await db.get(Category, category_id)
-        unbudgeted.append(
-            UnbudgetedCategoryOut(
-                category_id=category_id,
-                category_name=category.name if category else "",
-                spent_cents=spent,
-            )
+    # Una subcategoría cuyo padre sí está presupuestado ya cuenta en el ítem del padre.
+    unbudgeted_ids = {
+        cid
+        for cid, spent in spent_by_category.items()
+        if cid is not None
+        and cid not in budgeted_category_ids
+        and graph.parent_of.get(cid) not in budgeted_category_ids
+        and spent > 0
+    }
+
+    progresses, total_budgeted, days_elapsed, days_total = await _compute_live_progress(
+        db, items, month, period_start, period_end, spent_by_category, graph
+    )
+
+    # Incluye lo que no tiene categoría, igual que antes.
+    total_spent = sum(spent_by_category.values())
+
+    unbudgeted = [
+        UnbudgetedCategoryOut(
+            category_id=cid,
+            category_name=graph.names.get(cid, ""),
+            spent_cents=spent_by_category[cid],
         )
+        for cid in sorted(unbudgeted_ids, key=lambda c: spent_by_category[c], reverse=True)
+    ]
 
     expected_income_cents = await _compute_expected_income(db, user_id, budget, month)
     global_projected = project_period_end(total_spent, days_elapsed, days_total)
@@ -518,16 +813,78 @@ async def get_current(
 # la misma transacción de DB, así que ve el consumo ya actualizado sin
 # esperar a un commit. `jobs/check_budget_alerts.py` sigue corriendo a las
 # 20:00 para cubrir presupuestos sin movimiento ese día (el gancho no
-# reemplaza la corrida programada, la complementa). Ninguna de las dos
-# rutas persiste que ya se avisó — solo logs, igual que el resto de avisos
-# (CLAUDE.md: "Pendientes conocidos" — entrega push real es Fase 5) — así
-# que repetir el aviso en cada escritura mientras la categoría siga sobre
-# el umbral no rompe nada.
-
-# Se evalúa de mayor a menor; el primero que aplique gana.
-BUDGET_ALERT_THRESHOLDS = (100, 80)
+# reemplaza la corrida programada, la complementa). `push_service.notify_budget_alert`
+# es quien evita mandar el push dos veces (dedup en `budget_alerts_sent`,
+# válido igual si el gancho y el job caen el mismo umbral el mismo mes).
+#
+# Los umbrales salen de `notification_preferences.budget_alert_thresholds`
+# (default `{80,100}`, PLAN-backend.md §5) — configurables por el usuario
+# desde Ajustes → Notificaciones, ya no un valor fijo en este módulo.
 
 logger = structlog.get_logger("services.budget_service")
+
+
+async def _category_progress(
+    db: AsyncSession, user_id: UUID, category_id: UUID, month: str
+) -> tuple[int, str] | None:
+    """`(percent_consumed, category_name)` de UNA categoría, sin armar toda la
+    pantalla de `get_current` — el gancho de alertas corre en cada escritura.
+    Mismo criterio: mes cerrado → dato congelado; abierto → consumo vivo.
+    `None` si no hay presupuesto activo o la categoría no está presupuestada."""
+    budget = await _get_active_budget(db, user_id)
+    if budget is None:
+        return None
+
+    period_result = await db.execute(
+        select(BudgetPeriod).where(BudgetPeriod.budget_id == budget.id, BudgetPeriod.month == month)
+    )
+    closed_period = period_result.scalar_one_or_none()
+
+    if closed_period is not None:
+        frozen_result = await db.execute(
+            select(BudgetPeriodItem).where(
+                BudgetPeriodItem.budget_period_id == closed_period.id,
+                BudgetPeriodItem.category_id == category_id,
+            )
+        )
+        frozen = frozen_result.scalar_one_or_none()
+        if frozen is None:
+            return None
+        progress = compute_item_progress(
+            budgeted_cents=frozen.budgeted_cents,
+            spent_cents=frozen.spent_cents,
+            rollover_in_cents=frozen.rollover_in_cents,
+        )
+    else:
+        item_result = await db.execute(
+            select(BudgetItem).where(
+                BudgetItem.budget_id == budget.id,
+                BudgetItem.category_id == category_id,
+                BudgetItem.deleted_at.is_(None),
+            )
+        )
+        item = item_result.scalars().first()
+        if item is None:
+            return None
+        period_start, period_end = _month_bounds(month)
+        # El ítem de un padre consume también lo gastado en sus subcategorías.
+        children = (
+            await db.execute(
+                select(Category.id).where(
+                    Category.user_id == user_id, Category.parent_id == category_id
+                )
+            )
+        ).scalars()
+        spent = await _spent_for_categories(
+            db, user_id, [category_id, *children], period_start, period_end
+        )
+        rollover_in = (await _rollover_in_by_category(db, budget.id, month)).get(category_id, 0)
+        progress = compute_item_progress(
+            budgeted_cents=item.amount_cents, spent_cents=spent, rollover_in_cents=rollover_in
+        )
+
+    graph = await _category_graph(db, user_id, {category_id})
+    return progress.percent_consumed, graph.names.get(category_id, "")
 
 
 async def check_alerts_for_category(
@@ -535,24 +892,43 @@ async def check_alerts_for_category(
 ) -> None:
     """No hace nada si el usuario no tiene presupuesto activo o la
     categoría no está presupuestada ese mes — no es un error, es el caso
-    común de un gasto en una categoría sin límite."""
-    try:
-        current = await get_current(db, user_id, month)
-    except NotFoundError:
-        return
+    común de un gasto en una categoría sin límite.
 
-    item = next((i for i in current.items if i.category_id == category_id), None)
-    if item is None:
-        return
+    Un gasto en una subcategoría también mueve el ítem de su categoría padre
+    (su consumo la incluye), así que se revisan las dos."""
+    parent_id = (
+        await db.execute(
+            select(Category.parent_id).where(
+                Category.id == category_id, Category.user_id == user_id
+            )
+        )
+    ).scalar_one_or_none()
+    for target_id in (category_id, parent_id):
+        if target_id is not None:
+            await _alert_for_budgeted_category(db, user_id, target_id, month)
 
-    threshold = next((t for t in BUDGET_ALERT_THRESHOLDS if item.percent_consumed >= t), None)
+
+async def _alert_for_budgeted_category(
+    db: AsyncSession, user_id: UUID, category_id: UUID, month: str
+) -> None:
+    progress = await _category_progress(db, user_id, category_id, month)
+    if progress is None:
+        return
+    percent_consumed, category_name = progress
+
+    prefs = await notification_preferences_service.get_or_create(db, user_id)
+    thresholds = sorted(prefs.budget_alert_thresholds, reverse=True)
+    threshold = next((t for t in thresholds if percent_consumed >= t), None)
     if threshold is not None:
         logger.info(
             "budget_alert",
             user_id=str(user_id),
             category_id=str(category_id),
-            percent_consumed=item.percent_consumed,
+            percent_consumed=percent_consumed,
             threshold=threshold,
+        )
+        await push_service.notify_budget_alert(
+            db, user_id, category_id, category_name, month, percent_consumed, threshold
         )
 
 
@@ -577,8 +953,10 @@ async def close_period(
         select(BudgetItem).where(BudgetItem.budget_id == budget.id, BudgetItem.deleted_at.is_(None))
     )
     items = list(items_result.scalars().all())
+    spent_by_category = await _spent_by_category(db, user_id, period_start, period_end)
+    graph = await _category_graph(db, user_id, {item.category_id for item in items})
     progresses, _, _, _ = await _compute_live_progress(
-        db, user_id, items, month, period_start, period_end
+        db, items, month, period_start, period_end, spent_by_category, graph
     )
     expected_income_cents = await _compute_expected_income(db, user_id, budget, month)
 
@@ -631,6 +1009,37 @@ async def close_period(
     )
     await db.commit()
     return ClosePeriodResult(month=month, items=progresses)
+
+
+async def reopen_period(db: AsyncSession, user_id: UUID, budget_id: UUID, month: str) -> None:
+    """Deshace `close_period`: borra el congelado de ese mes y vuelve a calcularse
+    en vivo. Solo el último mes cerrado — si hay uno posterior, su rollover ya se
+    calculó sobre este y quedaría inconsistente."""
+    budget = await _get_owned(db, user_id, budget_id)
+    result = await db.execute(
+        select(BudgetPeriod).where(BudgetPeriod.budget_id == budget.id, BudgetPeriod.month >= month)
+    )
+    periods = {p.month: p for p in result.scalars().all()}
+    period = periods.get(month)
+    if period is None:
+        raise NotFoundError("Ese mes no está cerrado.", code="PERIOD_NOT_FOUND")
+    if len(periods) > 1:
+        raise ConflictError(
+            "Hay un mes posterior cerrado; reabre primero el más reciente.",
+            code="LATER_PERIOD_CLOSED",
+        )
+
+    await record_change(
+        db,
+        user_id=user_id,
+        entity_type="budget_period",
+        op="delete",
+        entity=period,
+        payload={"id": str(period.id), "month": month},
+    )
+    await db.execute(delete(BudgetPeriodItem).where(BudgetPeriodItem.budget_period_id == period.id))
+    await db.delete(period)
+    await db.commit()
 
 
 async def get_history(db: AsyncSession, user_id: UUID, budget_id: UUID) -> BudgetHistoryOut:
@@ -690,16 +1099,18 @@ async def copy_from_previous(db: AsyncSession, user_id: UUID, budget_id: UUID) -
         if current is not None:
             current.amount_cents = prev_item.budgeted_cents
             current.updated_at = datetime.now(UTC)
+            changed = current
         else:
-            db.add(
-                BudgetItem(
-                    id=uuid4(),
-                    user_id=user_id,
-                    budget_id=budget.id,
-                    category_id=prev_item.category_id,
-                    amount_cents=prev_item.budgeted_cents,
-                )
+            changed = BudgetItem(
+                id=uuid4(),
+                user_id=user_id,
+                budget_id=budget.id,
+                category_id=prev_item.category_id,
+                amount_cents=prev_item.budgeted_cents,
             )
+            db.add(changed)
+        await db.flush()
+        await _record_item_change(db, user_id, changed, op="upsert")
 
     await db.commit()
     await db.refresh(budget)

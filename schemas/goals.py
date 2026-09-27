@@ -7,6 +7,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from schemas.common import PatchModel
+
 
 class GoalCreate(BaseModel):
     id: UUID
@@ -17,7 +19,8 @@ class GoalCreate(BaseModel):
     icon: str | None = None
 
 
-class GoalUpdate(BaseModel):
+class GoalUpdate(PatchModel):
+    non_nullable = frozenset({"name", "target_amount_cents"})
     name: str | None = Field(default=None, min_length=1, max_length=255)
     target_amount_cents: int | None = Field(default=None, gt=0)
     target_date: date_ | None = None
