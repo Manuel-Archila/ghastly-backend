@@ -190,7 +190,7 @@ async def adjust_account(
         kind=kind,
         amount_cents=amount,
         currency=account.currency,
-        date=date.today(),
+        date=today_in_business_tz(),
         notes=data.note,
         is_reconciled=True,
     )

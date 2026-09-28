@@ -8,7 +8,6 @@ cuando `auto_create=false`) y por eso no commitea sola — pasa por
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from datetime import date as date_
 from uuid import UUID
 
 from sqlalchemy import select
@@ -16,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.errors import ConflictError, NotFoundError, ValidationAppError
+from core.timezone import today_in_business_tz
 from domain.balances import LedgerEntry, signed_delta
 from domain.money import Money
 from domain.recurrence import detect_price_increase, monthly_equivalent_cents, next_occurrence
@@ -194,7 +194,7 @@ async def confirm_rule(
         currency=rule.currency,
         fx_rate=rule.fx_rate,
         base_amount_cents=base_amount_cents,
-        date=data.date or date_.today(),
+        date=data.date or today_in_business_tz(),
         description=rule.name,
         recurring_rule_id=rule.id,
         is_extraordinary=rule.is_extraordinary,
@@ -222,7 +222,10 @@ async def confirm_rule(
     ):
         rule.price_history = [
             *rule.price_history,
-            {"date": (data.date or date_.today()).isoformat(), "amount_cents": rule.amount_cents},
+            {
+                "date": (data.date or today_in_business_tz()).isoformat(),
+                "amount_cents": rule.amount_cents,
+            },
         ]
     rule.last_amount_cents = rule.amount_cents
     rule.last_generated_at = now
@@ -251,7 +254,7 @@ async def confirm_rule(
 
 
 async def list_upcoming(db: AsyncSession, user_id: UUID, days: int = 30) -> list[RecurringRule]:
-    today = date_.today()
+    today = today_in_business_tz()
     result = await db.execute(
         select(RecurringRule)
         .where(
@@ -277,7 +280,7 @@ async def subscriptions_summary(db: AsyncSession, user_id: UUID) -> Subscription
     )
     rules = list(result.scalars().all())
 
-    cutoff = date_.today() - timedelta(days=CANCEL_CANDIDATE_WINDOW_DAYS)
+    cutoff = today_in_business_tz() - timedelta(days=CANCEL_CANDIDATE_WINDOW_DAYS)
     items: list[SubscriptionSummaryItem] = []
     total_monthly = 0
     for rule in rules:
