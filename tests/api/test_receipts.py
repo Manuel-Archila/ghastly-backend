@@ -6,7 +6,7 @@ from httpx import AsyncClient
 
 import core.object_storage as object_storage
 from config import Settings
-from tests.api.helpers import create_account, register_and_login
+from tests.api.helpers import create_account, default_expense_category, register_and_login
 
 
 def _idem() -> dict[str, str]:
@@ -50,6 +50,7 @@ async def _create_expense(
             "id": str(transaction_id),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 5_000,
             "date": f"{_current_month()}-05",
         },

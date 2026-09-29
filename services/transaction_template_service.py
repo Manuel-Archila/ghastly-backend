@@ -23,6 +23,7 @@ from schemas.transaction_templates import (
     TransactionTemplateOut,
     TransactionTemplateUpdate,
 )
+from services.category_requirement import ensure_category_present
 from services.change_log import record_change
 from storage.models.account import Account
 from storage.models.category import Category
@@ -60,6 +61,7 @@ async def create_template(
     db: AsyncSession, user_id: UUID, data: TransactionTemplateCreate
 ) -> TransactionTemplate:
     await _require_account(db, user_id, data.account_id)
+    ensure_category_present(data.kind, data.category_id)
     if data.category_id is not None:
         await _require_category_for_kind(db, user_id, data.category_id, data.kind)
 
@@ -126,6 +128,9 @@ async def update_template(
     # Cambiar el tipo también obliga a revisar la categoría que ya tenía.
     new_kind = changes.get("kind", template.kind)
     new_category_id = changes.get("category_id", template.category_id)
+    if "category_id" in changes or "kind" in changes:
+        # Cambiar el tipo a gasto también exige que quede con categoría.
+        ensure_category_present(new_kind, new_category_id)
     if new_category_id is not None and ("category_id" in changes or "kind" in changes):
         await _require_category_for_kind(db, user_id, new_category_id, new_kind)
 

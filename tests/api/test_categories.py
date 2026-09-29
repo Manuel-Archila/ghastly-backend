@@ -2,7 +2,12 @@ import uuid
 
 from httpx import AsyncClient
 
-from tests.api.helpers import create_account, create_category, register_and_login
+from tests.api.helpers import (
+    create_account,
+    create_category,
+    default_expense_category,
+    register_and_login,
+)
 
 
 async def test_seed_is_idempotent(client: AsyncClient) -> None:
@@ -42,6 +47,7 @@ async def test_rejects_third_level_category(client: AsyncClient) -> None:
             "id": str(uuid.uuid4()),
             "name": "Sub-renta",
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "parent_id": str(child_id),
         },
         headers=headers,

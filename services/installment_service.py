@@ -26,6 +26,7 @@ from schemas.installments import (
     InstallmentPlanOut,
     InstallmentPlanUpdate,
 )
+from services.category_requirement import ensure_category_present
 from services.change_log import record_change
 from storage.models.account import Account
 from storage.models.category import Category
@@ -62,6 +63,7 @@ async def create_plan(
     account = await db.get(Account, data.account_id)
     if account is None or account.user_id != user_id or account.deleted_at is not None:
         raise NotFoundError("La cuenta no existe.", code="ACCOUNT_NOT_FOUND")
+    ensure_category_present("expense", data.category_id)  # un plan de cuotas siempre es gasto
     if data.category_id is not None:
         category = await db.get(Category, data.category_id)
         if category is None or category.user_id != user_id or category.deleted_at is not None:
@@ -149,7 +151,10 @@ async def update_plan(
     db: AsyncSession, user_id: UUID, plan_id: UUID, data: InstallmentPlanUpdate
 ) -> InstallmentPlan:
     plan = await _get_owned_plan(db, user_id, plan_id)
-    for field, value in data.model_dump(exclude_unset=True).items():
+    changes = data.model_dump(exclude_unset=True)
+    if "category_id" in changes:
+        ensure_category_present("expense", changes["category_id"])
+    for field, value in changes.items():
         setattr(plan, field, value)
     plan.updated_at = datetime.now(UTC)
     await db.flush()
@@ -195,6 +200,8 @@ async def pay_installment(
     if installment.status != "pending":
         raise ConflictError("Esa cuota ya no está pendiente.", code="INSTALLMENT_NOT_PENDING")
     plan = await _get_owned_plan(db, user_id, installment.plan_id)
+    # Este camino crea la transacción sin pasar por `create_transaction`.
+    ensure_category_present("expense", plan.category_id)
     account = await db.get(Account, plan.account_id)
     assert account is not None  # invariante: la cuenta del plan no se borra físicamente
 

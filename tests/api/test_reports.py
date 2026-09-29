@@ -3,7 +3,12 @@ from datetime import UTC, datetime, timedelta
 
 from httpx import AsyncClient
 
-from tests.api.helpers import create_account, create_category, register_and_login
+from tests.api.helpers import (
+    create_account,
+    create_category,
+    default_expense_category,
+    register_and_login,
+)
 
 
 def _idem() -> dict[str, str]:
@@ -31,6 +36,8 @@ async def _create_transaction(
     category_id: uuid.UUID | None = None,
     is_extraordinary: bool = False,
 ) -> uuid.UUID:
+    if category_id is None and kind == "expense":
+        category_id = await default_expense_category(client, headers)
     transaction_id = uuid.uuid4()
     payload: dict[str, object] = {
         "id": str(transaction_id),
@@ -116,6 +123,7 @@ async def _create_installment_plan(
         json={
             "id": str(plan_id),
             "account_id": str(account_id),
+            "category_id": str(await default_expense_category(client, headers)),
             "description": description,
             "total_amount_cents": total_amount_cents,
             "installments_count": count,
@@ -144,6 +152,7 @@ async def _create_recurring_rule(
             "id": str(rule_id),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "name": name,
             "amount_cents": amount_cents,
             "frequency": "monthly",

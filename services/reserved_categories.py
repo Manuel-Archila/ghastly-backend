@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from domain.category_rule import UNCATEGORIZED_CATEGORY_NAME
 from services.change_log import record_change
 from storage.models.category import Category
 
@@ -53,3 +54,9 @@ async def get_or_create_adjustment_category(db: AsyncSession, user_id: UUID) -> 
 
 async def get_or_create_debt_category(db: AsyncSession, user_id: UUID) -> Category:
     return await get_or_create_category(db, user_id, DEBT_CATEGORY_NAME, kind="expense")
+
+
+async def get_or_create_uncategorized_category(db: AsyncSession, user_id: UUID) -> Category:
+    """ "Sin categoría": recibe los gastos que existían sin una cuando se aplicó la
+    regla "un gasto no puede existir sin categoría" (`uncategorized_backfill`)."""
+    return await get_or_create_category(db, user_id, UNCATEGORIZED_CATEGORY_NAME, kind="expense")

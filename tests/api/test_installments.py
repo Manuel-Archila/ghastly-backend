@@ -2,7 +2,7 @@ import uuid
 
 from httpx import AsyncClient
 
-from tests.api.helpers import create_account, register_and_login
+from tests.api.helpers import create_account, default_expense_category, register_and_login
 
 
 def _idem() -> dict[str, str]:
@@ -19,6 +19,7 @@ async def _create_plan(
         json={
             "id": str(plan_id),
             "account_id": str(account_id),
+            "category_id": str(await default_expense_category(client, headers)),
             "description": "Celular",
             "total_amount_cents": 1_000_000,
             "installments_count": count,
