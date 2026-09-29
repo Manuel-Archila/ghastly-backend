@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from httpx import AsyncClient
 
 from domain.dates import add_months_clamped
-from tests.api.helpers import create_account, register_and_login
+from tests.api.helpers import create_account, default_expense_category, register_and_login
 
 
 async def _create_expense(
@@ -21,6 +21,7 @@ async def _create_expense(
             "id": str(transaction_id),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": amount_cents,
             "date": date,
         },
@@ -117,6 +118,7 @@ async def test_credit_card_expense_increases_debt(client: AsyncClient) -> None:
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 3_000,
             "date": "2026-09-04",
         },
@@ -138,6 +140,7 @@ async def test_recalculate_matches_incremental_balance(client: AsyncClient) -> N
                 "id": str(uuid.uuid4()),
                 "account_id": str(account_id),
                 "kind": "expense",
+                "category_id": str(await default_expense_category(client, headers)),
                 "amount_cents": 100,
                 "date": "2026-09-04",
             },

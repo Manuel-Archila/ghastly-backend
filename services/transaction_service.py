@@ -37,6 +37,7 @@ from schemas.transactions import (
     TransferCreate,
 )
 from services import budget_service, transaction_template_service
+from services.category_requirement import ensure_category_present
 from services.change_log import record_change
 from services.query_filters import exclude_transfers
 from storage.models.account import Account
@@ -155,6 +156,7 @@ async def create_transaction(
     if account.is_archived:
         raise ValidationAppError("La cuenta está archivada.", code="ACCOUNT_ARCHIVED")
 
+    ensure_category_present(data.kind, data.category_id)
     if data.category_id is not None:
         category = await _get_owned_category(db, user_id, data.category_id)
         if category.kind != data.kind:
@@ -503,6 +505,10 @@ async def update_transaction(
     db: AsyncSession, user_id: UUID, transaction_id: UUID, updates: dict[str, Any]
 ) -> Transaction:
     transaction = await _get_owned_transaction(db, user_id, transaction_id)
+    # Solo si la edición toca la categoría: un gasto viejo sin ella puede seguir
+    # editándose (monto, fecha…) hasta que se le asigne una.
+    if "category_id" in updates:
+        ensure_category_present(transaction.kind, updates["category_id"])
     if "category_id" in updates and updates["category_id"] is not None:
         category = await _get_owned_category(db, user_id, updates["category_id"])
         if category.kind != transaction.kind:

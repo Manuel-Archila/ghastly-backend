@@ -89,3 +89,21 @@ async def create_category(
     response = await client.post("/v1/categories", json=payload, headers=headers)
     assert response.status_code == 200, response.text
     return category_id
+
+
+_DEFAULT_EXPENSE_CATEGORY: dict[str, UUID] = {}
+
+
+async def default_expense_category(client: AsyncClient, headers: dict[str, str]) -> UUID:
+    """Una categoría de gasto por usuario, creada la primera vez que se pide.
+
+    Un gasto no puede existir sin categoría (`domain/category_rule.py`): los tests
+    que solo necesitan "un gasto válido" usan esta y los que prueban la regla
+    la omiten a propósito.
+    """
+    key = headers["Authorization"]
+    if key not in _DEFAULT_EXPENSE_CATEGORY:
+        _DEFAULT_EXPENSE_CATEGORY[key] = await create_category(
+            client, headers, name="Gasto de prueba"
+        )
+    return _DEFAULT_EXPENSE_CATEGORY[key]

@@ -11,7 +11,12 @@ from datetime import date, timedelta
 
 from httpx import AsyncClient
 
-from tests.api.helpers import create_account, create_category, register_and_login
+from tests.api.helpers import (
+    create_account,
+    create_category,
+    default_expense_category,
+    register_and_login,
+)
 
 FX_RATE = "7.75"  # 1 USD = Q7.75, tasa de prueba
 
@@ -134,6 +139,7 @@ async def test_recurring_rule_in_usd_requires_fx_rate(client: AsyncClient) -> No
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "name": "Netflix",
             "amount_cents": 999,
             "currency": "USD",
@@ -224,6 +230,7 @@ async def test_upcoming_exposes_currency_for_usd_subscription(client: AsyncClien
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "name": "Netflix",
             "amount_cents": 999,
             "currency": "USD",

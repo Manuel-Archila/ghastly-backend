@@ -9,7 +9,12 @@ from decimal import Decimal
 
 from httpx import AsyncClient
 
-from tests.api.helpers import create_account, create_category, register_and_login
+from tests.api.helpers import (
+    create_account,
+    create_category,
+    default_expense_category,
+    register_and_login,
+)
 
 
 def _idem() -> dict[str, str]:
@@ -31,6 +36,8 @@ async def _create_transaction(
     currency: str = "GTQ",
     fx_rate: str | None = None,
 ) -> uuid.UUID:
+    if category_id is None and kind == "expense":
+        category_id = await default_expense_category(client, headers)
     transaction_id = uuid.uuid4()
     payload: dict[str, object] = {
         "id": str(transaction_id),
@@ -197,6 +204,7 @@ async def test_installment_transaction_amount_is_locked(client: AsyncClient) -> 
         json={
             "id": str(plan_id),
             "account_id": str(account_id),
+            "category_id": str(await default_expense_category(client, headers)),
             "description": "Refri",
             "total_amount_cents": 120_000,
             "installments_count": 1,
@@ -342,6 +350,7 @@ async def test_recurring_confirmation_amount_can_be_edited(client: AsyncClient) 
             "id": str(rule_id),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "name": "Netflix",
             "amount_cents": 5_000,
             "frequency": "monthly",
