@@ -30,6 +30,7 @@ from schemas.receivables import (
     ReceivableUpdate,
 )
 from services.change_log import record_change
+from services.reserved_categories import get_or_create_receivable_income_category
 from storage.models.account import Account
 from storage.models.receivable import Receivable
 from storage.models.transaction import Transaction
@@ -226,10 +227,12 @@ async def settle(
         raise ValidationAppError("La cuenta está archivada.", code="ACCOUNT_ARCHIVED")
 
     now = datetime.now(UTC)
+    category = await get_or_create_receivable_income_category(db, user_id)
     income_txn = Transaction(
         id=data.id,
         user_id=user_id,
         account_id=account.id,
+        category_id=category.id,
         kind="income",
         amount_cents=receivable.amount_cents,
         currency=account.currency,

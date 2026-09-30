@@ -8,6 +8,7 @@ from tests.api.helpers import (
     create_account,
     create_category,
     default_expense_category,
+    default_income_category,
     register_and_login,
 )
 
@@ -39,6 +40,8 @@ async def _create_transaction(
 ) -> uuid.UUID:
     if category_id is None and kind == "expense":
         category_id = await default_expense_category(client, headers)
+    if category_id is None and kind == "income":
+        category_id = await default_income_category(client, headers)
     transaction_id = uuid.uuid4()
     payload: dict[str, object] = {
         "id": str(transaction_id),

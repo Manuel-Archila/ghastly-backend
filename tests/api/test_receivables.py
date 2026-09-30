@@ -3,7 +3,12 @@ from datetime import UTC, datetime
 
 from httpx import AsyncClient
 
-from tests.api.helpers import create_account, default_expense_category, register_and_login
+from tests.api.helpers import (
+    create_account,
+    default_expense_category,
+    default_income_category,
+    register_and_login,
+)
 
 
 def _idem() -> dict[str, str]:
@@ -91,6 +96,7 @@ async def test_create_receivable_rejects_income_transaction(client: AsyncClient)
             "id": str(income_id),
             "account_id": str(account_id),
             "kind": "income",
+            "category_id": str(await default_income_category(client, headers)),
             "amount_cents": 100_000,
             "date": f"{_current_month()}-05",
         },
@@ -204,6 +210,14 @@ async def test_settle_creates_income_transaction_and_updates_balance(client: Asy
     assert txn.status_code == 200, txn.text
     assert txn.json()["data"]["kind"] == "income"
     assert txn.json()["data"]["amount_cents"] == 100_000
+    # Un ingreso no puede existir sin categoría: el cobro usa la reservada "Cobros".
+    category_id = txn.json()["data"]["category_id"]
+    assert category_id is not None
+    category = await client.get(f"/v1/categories/{category_id}", headers=headers)
+    assert (category.json()["data"]["name"], category.json()["data"]["kind"]) == (
+        "Cobros",
+        "income",
+    )
 
     account = await client.get("/v1/accounts", headers=headers)
     balances = {a["id"]: a["current_balance_cents"] for a in account.json()["data"]}

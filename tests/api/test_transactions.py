@@ -7,6 +7,7 @@ from tests.api.helpers import (
     create_account,
     create_category,
     default_expense_category,
+    default_income_category,
     register_and_login,
 )
 
@@ -231,6 +232,7 @@ async def test_refund_requires_expense(client: AsyncClient) -> None:
             "id": str(income_id),
             "account_id": str(account_id),
             "kind": "income",
+            "category_id": str(await default_income_category(client, headers)),
             "amount_cents": 500,
             "date": "2026-09-04",
         },

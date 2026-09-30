@@ -1,8 +1,8 @@
-"""Un gasto no puede existir sin categoría (`domain/category_rule.py`).
+"""Un gasto o un ingreso no pueden existir sin categoría (`domain/category_rule.py`).
 
-Vale para todo lo que termina siendo un gasto: la transacción, la regla
-recurrente, el plan de cuotas y la plantilla, y también cuando llega por
-`/sync/push`. Los ingresos y las transferencias pueden no tener categoría.
+Vale para todo lo que termina siendo un gasto o un ingreso: la transacción, la regla
+recurrente, el plan de cuotas (siempre gasto) y la plantilla, y también cuando llega
+por `/sync/push`. Las transferencias entre cuentas propias no llevan categoría.
 """
 
 import uuid
@@ -102,13 +102,26 @@ async def test_expense_with_category_is_accepted(client: AsyncClient) -> None:
     assert response.status_code == 200, response.text
 
 
-async def test_income_without_category_is_allowed(client: AsyncClient) -> None:
+async def test_income_without_category_is_rejected(client: AsyncClient) -> None:
     headers = await register_and_login(client)
     account_id = await create_account(client, headers)
 
     response = await client.post(
         "/v1/transactions",
         json=_transaction(account_id, kind="income"),
+        headers={**headers, **_idem()},
+    )
+    assert _is_category_required(response), response.text
+
+
+async def test_income_with_category_is_accepted(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers)
+    income_category = await create_category(client, headers, kind="income", name="Salario")
+
+    response = await client.post(
+        "/v1/transactions",
+        json=_transaction(account_id, kind="income", category_id=str(income_category)),
         headers={**headers, **_idem()},
     )
     assert response.status_code == 200, response.text
@@ -146,18 +159,18 @@ async def test_editing_an_expense_without_touching_its_category_is_allowed(
     assert response.status_code == 200, response.text
 
 
-async def test_clearing_an_income_category_is_allowed(client: AsyncClient) -> None:
+async def test_clearing_an_income_category_is_rejected(client: AsyncClient) -> None:
     headers = await register_and_login(client)
     account_id = await create_account(client, headers)
     income_category = await create_category(client, headers, kind="income", name="Salario")
     payload = _transaction(account_id, kind="income", category_id=str(income_category))
-    await client.post("/v1/transactions", json=payload, headers={**headers, **_idem()})
+    created = await client.post("/v1/transactions", json=payload, headers={**headers, **_idem()})
+    assert created.status_code == 200, created.text
 
     response = await client.patch(
         f"/v1/transactions/{payload['id']}", json={"category_id": None}, headers=headers
     )
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["category_id"] is None
+    assert _is_category_required(response), response.text
 
 
 # ---------- sincronización (push desde el teléfono)
@@ -209,14 +222,14 @@ async def test_recurring_expense_rule_requires_category(client: AsyncClient) -> 
     assert _is_category_required(response), response.text
 
 
-async def test_recurring_income_rule_does_not_require_category(client: AsyncClient) -> None:
+async def test_recurring_income_rule_requires_category(client: AsyncClient) -> None:
     headers = await register_and_login(client)
     account_id = await create_account(client, headers)
 
     response = await client.post(
         "/v1/recurring-rules", json=_rule(account_id, kind="income"), headers=headers
     )
-    assert response.status_code == 200, response.text
+    assert _is_category_required(response), response.text
 
 
 async def test_clearing_a_recurring_rule_category_is_rejected(client: AsyncClient) -> None:
@@ -282,14 +295,14 @@ async def test_expense_template_requires_category(client: AsyncClient) -> None:
     assert _is_category_required(response), response.text
 
 
-async def test_income_template_does_not_require_category(client: AsyncClient) -> None:
+async def test_income_template_requires_category(client: AsyncClient) -> None:
     headers = await register_and_login(client)
     account_id = await create_account(client, headers)
 
     response = await client.post(
         "/v1/transaction-templates", json=_template(account_id, kind="income"), headers=headers
     )
-    assert response.status_code == 200, response.text
+    assert _is_category_required(response), response.text
 
 
 async def test_clearing_an_expense_template_category_is_rejected(client: AsyncClient) -> None:
@@ -306,16 +319,39 @@ async def test_clearing_an_expense_template_category_is_rejected(client: AsyncCl
     assert _is_category_required(response), response.text
 
 
-async def test_switching_a_template_to_expense_without_a_category_is_rejected(
+async def test_switching_a_template_kind_while_clearing_its_category_is_rejected(
     client: AsyncClient,
 ) -> None:
     headers = await register_and_login(client)
     account_id = await create_account(client, headers)
-    template = _template(account_id, kind="income")
+    income_category = await create_category(client, headers, kind="income", name="Salario")
+    template = _template(account_id, kind="income", category_id=str(income_category))
     created = await client.post("/v1/transaction-templates", json=template, headers=headers)
     assert created.status_code == 200, created.text
 
     response = await client.patch(
-        f"/v1/transaction-templates/{template['id']}", json={"kind": "expense"}, headers=headers
+        f"/v1/transaction-templates/{template['id']}",
+        json={"kind": "expense", "category_id": None},
+        headers=headers,
     )
     assert _is_category_required(response), response.text
+
+
+async def test_transfers_do_not_need_a_category(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    from_account = await create_account(client, headers, initial_balance_cents=100_000)
+    to_account = await create_account(client, headers, name="Destino")
+
+    response = await client.post(
+        "/v1/transactions/transfer",
+        json={
+            "out_transaction_id": str(uuid.uuid4()),
+            "in_transaction_id": str(uuid.uuid4()),
+            "from_account_id": str(from_account),
+            "to_account_id": str(to_account),
+            "amount_cents": 10_000,
+            "date": "2026-09-05",
+        },
+        headers={**headers, **_idem()},
+    )
+    assert response.status_code == 200, response.text

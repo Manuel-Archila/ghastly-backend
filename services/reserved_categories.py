@@ -16,6 +16,7 @@ from services.change_log import record_change
 from storage.models.category import Category
 
 ADJUSTMENT_CATEGORY_NAME = "Ajuste de saldo"  # POST /accounts/{id}/adjust (caso 9)
+RECEIVABLE_CATEGORY_NAME = "Cobros"  # ingreso que crea liquidar un "Me deben"
 DEBT_CATEGORY_NAME = "Deudas e intereses"  # ya viene en la semilla; se reusa si existe
 
 
@@ -60,3 +61,9 @@ async def get_or_create_uncategorized_category(db: AsyncSession, user_id: UUID) 
     """ "Sin categoría": recibe los gastos que existían sin una cuando se aplicó la
     regla "un gasto no puede existir sin categoría" (`uncategorized_backfill`)."""
     return await get_or_create_category(db, user_id, UNCATEGORIZED_CATEGORY_NAME, kind="expense")
+
+
+async def get_or_create_receivable_income_category(db: AsyncSession, user_id: UUID) -> Category:
+    """Categoría de ingreso del cobro que crea liquidar un "Me deben". Un ingreso
+    no puede existir sin categoría (`domain/category_rule.py`)."""
+    return await get_or_create_category(db, user_id, RECEIVABLE_CATEGORY_NAME, kind="income")
