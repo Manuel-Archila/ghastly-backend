@@ -59,7 +59,14 @@ class TransferCreate(BaseModel):
     in_transaction_id: UUID
     from_account_id: UUID
     to_account_id: UUID
-    amount_cents: int = Field(gt=0)
+    amount_cents: int = Field(gt=0)  # en la moneda de from_account
+    # Requerido si to_account tiene una moneda distinta de from_account: cuánto
+    # llegó de verdad a la cuenta destino, en SU moneda. Sin esto, transferir
+    # Q10 a una cuenta en dólares los acreditaba como $10 (caso de negocio 4
+    # roto: ninguna conversión). No se pide "la tasa de hoy" — mismo criterio
+    # que quick-add/suscripciones: el monto real ya lo sabe el usuario (su
+    # banco/tarjeta), la tasa se deriva de los dos montos.
+    to_amount_cents: int | None = Field(default=None, gt=0)
     date: date_
     description: str | None = Field(default=None, max_length=500)
     notes: str | None = None
