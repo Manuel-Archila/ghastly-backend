@@ -10,7 +10,6 @@ de este módulo que no hace commit (pasa por
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from datetime import date as date_
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
@@ -18,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.errors import ConflictError, NotFoundError, ValidationAppError
+from core.timezone import today_in_business_tz
 from domain.balances import LedgerEntry, signed_delta
 from domain.installments import generate_installment_schedule
 from schemas.installments import (
@@ -214,7 +214,7 @@ async def pay_installment(
         kind="expense",
         amount_cents=installment.amount_cents,
         currency=account.currency,
-        date=data.date or date_.today(),
+        date=data.date or today_in_business_tz(),
         description=f"Cuota {installment.number}/{plan.installments_count}: {plan.description}",
         installment_id=installment.id,
         created_at=now,
@@ -269,7 +269,7 @@ async def pay_installment(
 
 
 async def list_upcoming(db: AsyncSession, user_id: UUID, days: int = 30) -> list[Installment]:
-    today = date_.today()
+    today = today_in_business_tz()
     result = await db.execute(
         select(Installment)
         .where(

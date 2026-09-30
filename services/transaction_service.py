@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.errors import ConflictError, NotFoundError, ValidationAppError
 from core.pagination import Cursor, CursorError
+from core.timezone import today_in_business_tz
 from domain.balances import LedgerEntry, signed_delta
 from domain.duplicates import DuplicateCandidate, ExistingTransaction, find_possible_duplicate
 from domain.money import Money
@@ -327,7 +328,7 @@ async def refund(
         )
     amount = data.amount_cents or original.amount_cents
     account = await _get_owned_account(db, user_id, original.account_id)
-    refund_date = data.date or date_.today()
+    refund_date = data.date or today_in_business_tz()
     fx_rate, base_amount_cents = await _resolve_fx(
         db, original.currency, amount, refund_date, data.fx_rate
     )

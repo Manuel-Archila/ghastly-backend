@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 from httpx import AsyncClient
 
+from core.timezone import today_in_business_tz
 from tests.api.helpers import (
     create_account,
     create_category,
@@ -1371,6 +1372,21 @@ async def test_upcoming_defaults_to_30_days(client: AsyncClient) -> None:
 
     response = await client.get("/v1/reports/upcoming", headers=headers)
     assert response.json()["data"]["days"] == 30
+
+
+async def test_upcoming_includes_item_due_today_in_business_timezone(client: AsyncClient) -> None:
+    """ "Hoy" lo define el servidor en America/Guatemala, no el UTC del contenedor
+    (CLAUDE.md): una regla que vence hoy no puede depender de qué hora UTC es
+    ahora mismo. `recurring_service.list_upcoming` usaba `date.today()` (UTC) y
+    la perdía cada noche, entre las 18:00 y la medianoche hora de Guatemala."""
+    headers = await register_and_login(client)
+    account_id = await create_account(client, headers, initial_balance_cents=1_000_000)
+    today = today_in_business_tz().isoformat()
+    await _create_recurring_rule(client, headers, account_id, next_due_date=today)
+
+    response = await client.get("/v1/reports/upcoming?days=30", headers=headers)
+    due_dates = [item["due_date"] for item in response.json()["data"]["items"]]
+    assert today in due_dates
 
 
 async def test_upcoming_isolated_from_other_users_data(client: AsyncClient) -> None:
