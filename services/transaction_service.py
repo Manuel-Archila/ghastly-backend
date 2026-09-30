@@ -245,6 +245,36 @@ async def transfer(
         if account.is_archived:
             raise ValidationAppError("La cuenta está archivada.", code="ACCOUNT_ARCHIVED")
 
+    same_currency = from_account.currency == to_account.currency
+    if not same_currency and data.to_amount_cents is None:
+        raise ValidationAppError(
+            "Las cuentas son de monedas distintas; hace falta cuánto llegó a la cuenta destino.",
+            field="to_amount_cents",
+            code="TRANSFER_TO_AMOUNT_REQUIRED",
+        )
+    # in_amount: lo que de verdad se acredita en to_account, en SU moneda —
+    # nunca el mismo número que salió si la moneda no es la misma.
+    in_amount = data.amount_cents if same_currency else data.to_amount_cents
+    assert in_amount is not None  # validado arriba
+
+    # fx_rate/base_amount_cents (regla de negocio 4) solo tienen sentido cuando
+    # uno de los dos lados es GTQ: es la única moneda "base" que existe. Entre
+    # dos monedas extranjeras distintas (caso raro, ninguna de las dos
+    # soportadas hoy en la UI) se deja sin congelar, igual que antes.
+    out_base: int | None = data.amount_cents if from_account.currency == "GTQ" else None
+    in_base: int | None = in_amount if to_account.currency == "GTQ" else None
+    out_rate: Decimal | None = None
+    in_rate: Decimal | None = None
+    if not same_currency:
+        if from_account.currency == "GTQ":
+            # Sale en GTQ, entra en moneda extranjera: ese monto extranjero
+            # "vale" lo que salió — es la tasa la que se deriva, no al revés.
+            in_base = data.amount_cents
+            in_rate = Decimal(data.amount_cents) / Decimal(in_amount)
+        elif to_account.currency == "GTQ":
+            out_base = in_amount
+            out_rate = Decimal(in_amount) / Decimal(data.amount_cents)
+
     transfer_group_id = uuid4()
     now = datetime.now(UTC)
 
@@ -255,6 +285,8 @@ async def transfer(
         kind="transfer",
         amount_cents=data.amount_cents,
         currency=from_account.currency,
+        fx_rate=out_rate,
+        base_amount_cents=out_base,
         date=data.date,
         description=data.description,
         notes=data.notes,
@@ -268,8 +300,10 @@ async def transfer(
         user_id=user_id,
         account_id=to_account.id,
         kind="transfer",
-        amount_cents=data.amount_cents,
+        amount_cents=in_amount,
         currency=to_account.currency,
+        fx_rate=in_rate,
+        base_amount_cents=in_base,
         date=data.date,
         description=data.description,
         notes=data.notes,
@@ -293,7 +327,7 @@ async def transfer(
     )
     _apply_ledger_entry(
         to_account,
-        LedgerEntry(kind="transfer", amount_cents=data.amount_cents, transfer_direction="in"),
+        LedgerEntry(kind="transfer", amount_cents=in_amount, transfer_direction="in"),
     )
 
     for txn in (out_txn, in_txn):

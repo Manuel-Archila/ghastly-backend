@@ -186,6 +186,132 @@ async def test_transfer_same_account_rejected(client: AsyncClient) -> None:
     assert response.json()["data"]["code"] == "TRANSFER_SAME_ACCOUNT"
 
 
+async def test_transfer_between_currencies_requires_destination_amount(
+    client: AsyncClient,
+) -> None:
+    headers = await register_and_login(client)
+    gtq = await create_account(client, headers, initial_balance_cents=100_000, currency="GTQ")
+    usd = await create_account(client, headers, initial_balance_cents=0, currency="USD")
+
+    response = await client.post(
+        "/v1/transactions/transfer",
+        json={
+            "out_transaction_id": str(uuid.uuid4()),
+            "in_transaction_id": str(uuid.uuid4()),
+            "from_account_id": str(gtq),
+            "to_account_id": str(usd),
+            "amount_cents": 1_000,
+            "date": "2026-09-04",
+        },
+        headers={**headers, **_idem()},
+    )
+    assert response.status_code == 422
+    assert response.json()["data"]["code"] == "TRANSFER_TO_AMOUNT_REQUIRED"
+
+
+async def test_transfer_gtq_to_usd_converts_the_incoming_leg_case_04(
+    client: AsyncClient,
+) -> None:
+    """Q1,000 salen de la cuenta en quetzales; a 7.80 por dólar, entran
+    $128.21 a la cuenta en dólares — nunca "1,000 dólares"."""
+    headers = await register_and_login(client)
+    gtq = await create_account(client, headers, initial_balance_cents=200_000, currency="GTQ")
+    usd = await create_account(client, headers, initial_balance_cents=0, currency="USD")
+    out_id, in_id = uuid.uuid4(), uuid.uuid4()
+
+    response = await client.post(
+        "/v1/transactions/transfer",
+        json={
+            "out_transaction_id": str(out_id),
+            "in_transaction_id": str(in_id),
+            "from_account_id": str(gtq),
+            "to_account_id": str(usd),
+            "amount_cents": 100_000,  # Q1,000
+            "to_amount_cents": 12_821,  # $128.21
+            "date": "2026-09-04",
+        },
+        headers={**headers, **_idem()},
+    )
+    assert response.status_code == 200, response.text
+
+    gtq_acc = await client.get(f"/v1/accounts/{gtq}", headers=headers)
+    usd_acc = await client.get(f"/v1/accounts/{usd}", headers=headers)
+    assert gtq_acc.json()["data"]["current_balance_cents"] == 100_000
+    assert usd_acc.json()["data"]["current_balance_cents"] == 12_821  # no 100_000
+
+    out_txn = await client.get(f"/v1/transactions/{out_id}", headers=headers)
+    in_txn = await client.get(f"/v1/transactions/{in_id}", headers=headers)
+    assert out_txn.json()["data"]["amount_cents"] == 100_000
+    assert out_txn.json()["data"]["currency"] == "GTQ"
+    assert out_txn.json()["data"]["base_amount_cents"] == 100_000
+    assert in_txn.json()["data"]["amount_cents"] == 12_821
+    assert in_txn.json()["data"]["currency"] == "USD"
+    assert in_txn.json()["data"]["base_amount_cents"] == 100_000
+    assert Decimal(in_txn.json()["data"]["fx_rate"]).quantize(Decimal("0.01")) == Decimal("7.80")
+
+
+async def test_transfer_usd_to_gtq_converts_the_outgoing_leg(client: AsyncClient) -> None:
+    headers = await register_and_login(client)
+    usd = await create_account(client, headers, initial_balance_cents=20_000, currency="USD")
+    gtq = await create_account(client, headers, initial_balance_cents=0, currency="GTQ")
+    out_id, in_id = uuid.uuid4(), uuid.uuid4()
+
+    response = await client.post(
+        "/v1/transactions/transfer",
+        json={
+            "out_transaction_id": str(out_id),
+            "in_transaction_id": str(in_id),
+            "from_account_id": str(usd),
+            "to_account_id": str(gtq),
+            "amount_cents": 10_000,  # $100.00
+            "to_amount_cents": 780_000,  # Q7,800.00
+            "date": "2026-09-04",
+        },
+        headers={**headers, **_idem()},
+    )
+    assert response.status_code == 200, response.text
+
+    usd_acc = await client.get(f"/v1/accounts/{usd}", headers=headers)
+    gtq_acc = await client.get(f"/v1/accounts/{gtq}", headers=headers)
+    assert usd_acc.json()["data"]["current_balance_cents"] == 10_000
+    assert gtq_acc.json()["data"]["current_balance_cents"] == 780_000
+
+    out_txn = await client.get(f"/v1/transactions/{out_id}", headers=headers)
+    assert out_txn.json()["data"]["base_amount_cents"] == 780_000
+    assert Decimal(out_txn.json()["data"]["fx_rate"]) == Decimal("78")
+
+
+async def test_transfer_same_currency_still_freezes_gtq_base_amount(
+    client: AsyncClient,
+) -> None:
+    """Caso normal (las dos cuentas en GTQ): no se rompió el invariante de que
+    base_amount_cents nunca es null en GTQ."""
+    headers = await register_and_login(client)
+    a = await create_account(client, headers, initial_balance_cents=50_000)
+    b = await create_account(client, headers, initial_balance_cents=0)
+    out_id, in_id = uuid.uuid4(), uuid.uuid4()
+
+    response = await client.post(
+        "/v1/transactions/transfer",
+        json={
+            "out_transaction_id": str(out_id),
+            "in_transaction_id": str(in_id),
+            "from_account_id": str(a),
+            "to_account_id": str(b),
+            "amount_cents": 5_000,
+            "date": "2026-09-04",
+        },
+        headers={**headers, **_idem()},
+    )
+    assert response.status_code == 200, response.text
+    out_txn = await client.get(f"/v1/transactions/{out_id}", headers=headers)
+    in_txn = await client.get(f"/v1/transactions/{in_id}", headers=headers)
+    assert out_txn.json()["data"]["base_amount_cents"] == 5_000
+    assert in_txn.json()["data"]["base_amount_cents"] == 5_000
+    assert out_txn.json()["data"]["fx_rate"] is None
+    assert in_txn.json()["data"]["fx_rate"] is None
+
+
 async def test_refund_creates_income_linked_to_original_case_02(client: AsyncClient) -> None:
     headers = await register_and_login(client)
     account_id = await create_account(client, headers, initial_balance_cents=10_000)
