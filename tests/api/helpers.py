@@ -107,3 +107,17 @@ async def default_expense_category(client: AsyncClient, headers: dict[str, str])
             client, headers, name="Gasto de prueba"
         )
     return _DEFAULT_EXPENSE_CATEGORY[key]
+
+
+_DEFAULT_INCOME_CATEGORY: dict[str, UUID] = {}
+
+
+async def default_income_category(client: AsyncClient, headers: dict[str, str]) -> UUID:
+    """Una categoría de ingreso por usuario, creada la primera vez que se pide.
+    Un ingreso tampoco puede existir sin categoría (`domain/category_rule.py`)."""
+    key = headers["Authorization"]
+    if key not in _DEFAULT_INCOME_CATEGORY:
+        _DEFAULT_INCOME_CATEGORY[key] = await create_category(
+            client, headers, kind="income", name="Ingreso de prueba"
+        )
+    return _DEFAULT_INCOME_CATEGORY[key]

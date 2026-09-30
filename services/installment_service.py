@@ -20,12 +20,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.errors import ConflictError, NotFoundError, ValidationAppError
 from domain.balances import LedgerEntry, signed_delta
 from domain.installments import generate_installment_schedule
+from schemas.accounts import AccountOut
 from schemas.installments import (
+    InstallmentOut,
     InstallmentPayRequest,
     InstallmentPlanCreate,
     InstallmentPlanOut,
     InstallmentPlanUpdate,
 )
+from schemas.transactions import TransactionOut
 from services.category_requirement import ensure_category_present
 from services.change_log import record_change
 from storage.models.account import Account
@@ -96,19 +99,25 @@ async def create_plan(
         data.first_payment_date,
         data.monthly_interest_rate,
     )
+    installments: list[Installment] = []
     for entry, installment_id in zip(schedule, data.installment_ids, strict=True):
-        db.add(
-            Installment(
-                id=installment_id,
-                user_id=user_id,
-                plan_id=plan.id,
-                number=entry.number,
-                due_date=entry.due_date,
-                amount_cents=entry.amount_cents,
-                principal_cents=entry.principal_cents,
-                interest_cents=entry.interest_cents,
-            )
+        installment = Installment(
+            id=installment_id,
+            user_id=user_id,
+            plan_id=plan.id,
+            number=entry.number,
+            due_date=entry.due_date,
+            amount_cents=entry.amount_cents,
+            principal_cents=entry.principal_cents,
+            interest_cents=entry.interest_cents,
+            # Explícitos: `status` tiene server_default, y sin esto el atributo
+            # queda sin cargar tras el flush y serializarlo falla en async.
+            status="pending",
+            paid_at=None,
+            transaction_id=None,
         )
+        db.add(installment)
+        installments.append(installment)
 
     await db.flush()
     await record_change(
@@ -119,6 +128,18 @@ async def create_plan(
         entity=plan,
         payload=InstallmentPlanOut.model_validate(plan).model_dump(mode="json"),
     )
+    # Cada cuota también viaja al teléfono: su calendario local se llena solo con
+    # entradas `installment`. Sin esto la app ve el plan pero ninguna cuota, y el
+    # compromiso del mes, el pasivo y el calendario quedan en cero.
+    for installment in installments:
+        await record_change(
+            db,
+            user_id=user_id,
+            entity_type="installment",
+            op="upsert",
+            entity=installment,
+            payload=InstallmentOut.model_validate(installment).model_dump(mode="json"),
+        )
     await db.commit()
     await db.refresh(plan)
     return plan
@@ -249,13 +270,34 @@ async def pay_installment(
         plan.status = "completed"
         plan.updated_at = now
 
+    # El teléfono aplica estas entradas campo por campo: un payload a medias
+    # (antes solo `id` e `installment_id`) no se puede guardar localmente y el
+    # pago no aparecía en la app ni movía el saldo. `refresh` carga los valores
+    # que puso la base (server_default) antes de serializar.
+    await db.refresh(transaction)
     await record_change(
         db,
         user_id=user_id,
         entity_type="transaction",
         op="upsert",
         entity=transaction,
-        payload={"id": str(transaction.id), "installment_id": str(installment.id)},
+        payload=TransactionOut.model_validate(transaction).model_dump(mode="json"),
+    )
+    await record_change(
+        db,
+        user_id=user_id,
+        entity_type="account",
+        op="upsert",
+        entity=account,
+        payload=AccountOut.model_validate(account).model_dump(mode="json"),
+    )
+    await record_change(
+        db,
+        user_id=user_id,
+        entity_type="installment",
+        op="upsert",
+        entity=installment,
+        payload=InstallmentOut.model_validate(installment).model_dump(mode="json"),
     )
     await record_change(
         db,

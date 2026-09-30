@@ -6,6 +6,7 @@ from tests.api.helpers import (
     create_account,
     create_category,
     default_expense_category,
+    default_income_category,
     register_and_login,
 )
 
@@ -66,6 +67,7 @@ async def test_rejects_kind_mismatch_between_parent_and_child(client: AsyncClien
             "id": str(uuid.uuid4()),
             "name": "Hijo de otro tipo",
             "kind": "income",
+            "category_id": str(await default_income_category(client, headers)),
             "parent_id": str(parent_id),
         },
         headers=headers,
