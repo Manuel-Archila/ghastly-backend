@@ -58,6 +58,7 @@ CATEGORY_EDITABLE_FIELDS = {"name", "icon", "color", "is_tax_deductible", "sort_
 TRANSACTION_EDITABLE_FIELDS = {
     "category_id",
     "date",
+    "amount_cents",
     "description",
     "merchant",
     "notes",

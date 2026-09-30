@@ -3,7 +3,12 @@ from decimal import Decimal
 
 from httpx import AsyncClient
 
-from tests.api.helpers import create_account, create_category, register_and_login
+from tests.api.helpers import (
+    create_account,
+    create_category,
+    default_expense_category,
+    register_and_login,
+)
 
 
 def _idem() -> dict[str, str]:
@@ -20,6 +25,7 @@ async def test_create_expense_reduces_balance(client: AsyncClient) -> None:
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 1_500,
             "date": "2026-09-04",
             "description": "Almuerzo",
@@ -43,6 +49,7 @@ async def test_create_transaction_requires_idempotency_key(client: AsyncClient) 
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 100,
             "date": "2026-09-04",
         },
@@ -60,6 +67,7 @@ async def test_retrying_same_idempotency_key_does_not_duplicate(client: AsyncCli
         "id": str(uuid.uuid4()),
         "account_id": str(account_id),
         "kind": "expense",
+        "category_id": str(await default_expense_category(client, headers)),
         "amount_cents": 1_000,
         "date": "2026-09-04",
     }
@@ -84,6 +92,7 @@ async def test_reusing_idempotency_key_with_different_body_is_conflict(client: A
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 100,
             "date": "2026-09-04",
         },
@@ -95,6 +104,7 @@ async def test_reusing_idempotency_key_with_different_body_is_conflict(client: A
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 999,
             "date": "2026-09-04",
         },
@@ -110,6 +120,7 @@ async def test_duplicate_warning_within_window(client: AsyncClient) -> None:
     body = {
         "account_id": str(account_id),
         "kind": "expense",
+        "category_id": str(await default_expense_category(client, headers)),
         "amount_cents": 250,
         "date": "2026-09-04",
     }
@@ -244,6 +255,7 @@ async def test_usd_purchase_freezes_fx_rate_case_04(client: AsyncClient) -> None
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 10_000,
             "currency": "USD",
             "fx_rate": "7.85",
@@ -267,6 +279,7 @@ async def test_usd_purchase_without_rate_and_no_fallback_fails(client: AsyncClie
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 10_000,
             "currency": "USD",
             "date": "2026-09-04",
@@ -287,6 +300,7 @@ async def test_soft_delete_and_restore(client: AsyncClient) -> None:
             "id": str(txn_id),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 100,
             "date": "2026-09-04",
         },
@@ -317,6 +331,7 @@ async def test_cross_user_cannot_read_transaction(client: AsyncClient) -> None:
             "id": str(txn_id),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers_a)),
             "amount_cents": 100,
             "date": "2026-09-04",
         },
@@ -339,6 +354,7 @@ async def test_cursor_pagination(client: AsyncClient) -> None:
                 "id": str(uuid.uuid4()),
                 "account_id": str(account_id),
                 "kind": "expense",
+                "category_id": str(await default_expense_category(client, headers)),
                 "amount_cents": 100,
                 "date": f"2026-09-0{day}",
             },
@@ -373,6 +389,7 @@ async def test_list_filters_by_text_search_across_description_merchant_notes(
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 100,
             "date": "2026-09-01",
             "description": "Almuerzo con el equipo",
@@ -385,6 +402,7 @@ async def test_list_filters_by_text_search_across_description_merchant_notes(
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 200,
             "date": "2026-09-02",
             "merchant": "Supermercado La Torre",
@@ -397,6 +415,7 @@ async def test_list_filters_by_text_search_across_description_merchant_notes(
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 300,
             "date": "2026-09-03",
             "notes": "pendiente de reembolso del equipo",
@@ -427,6 +446,7 @@ async def test_list_filters_by_any_matching_tag(client: AsyncClient) -> None:
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 100,
             "date": "2026-09-01",
             "tags": ["viaje", "trabajo"],
@@ -439,6 +459,7 @@ async def test_list_filters_by_any_matching_tag(client: AsyncClient) -> None:
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 200,
             "date": "2026-09-02",
             "tags": ["personal"],
@@ -451,6 +472,7 @@ async def test_list_filters_by_any_matching_tag(client: AsyncClient) -> None:
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 300,
             "date": "2026-09-03",
         },

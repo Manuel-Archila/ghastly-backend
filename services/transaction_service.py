@@ -38,11 +38,14 @@ from schemas.transactions import (
     TransferCreate,
 )
 from services import budget_service, transaction_template_service
+from services.category_requirement import ensure_category_present
 from services.change_log import record_change
 from services.query_filters import exclude_transfers
 from storage.models.account import Account
 from storage.models.category import Category
+from storage.models.debt import DebtPayment
 from storage.models.fx import FxRate
+from storage.models.goal import GoalContribution
 from storage.models.transaction import Transaction
 
 
@@ -154,6 +157,7 @@ async def create_transaction(
     if account.is_archived:
         raise ValidationAppError("La cuenta está archivada.", code="ACCOUNT_ARCHIVED")
 
+    ensure_category_present(data.kind, data.category_id)
     if data.category_id is not None:
         category = await _get_owned_category(db, user_id, data.category_id)
         if category.kind != data.kind:
@@ -456,10 +460,56 @@ async def get_transaction(db: AsyncSession, user_id: UUID, transaction_id: UUID)
     return await _get_owned_transaction(db, user_id, transaction_id)
 
 
+async def _locked_amount_reason(db: AsyncSession, transaction: Transaction) -> str | None:
+    """Por qué NO se puede editar el monto de esta transacción, o `None` si sí
+    se puede. Cada uno de estos casos tiene un monto que otra fila asume que
+    coincide con `amount_cents` — cambiarlo acá los desincroniza:
+    - `transfer`: son dos filas que deben coincidir; se edita desde las dos
+      cuentas, no desde una transacción suelta.
+    - cuota de un plan (`installment_id`): el monto lo define el cronograma
+      del plan (`installments.amount_cents`).
+    - liquidación de un "me deben" (`receivable_id`): el monto ya quedó fijo
+      en `receivables.amount_cents` al liquidar.
+    - pago de deuda o aporte a meta: `debt_payments`/`goal_contributions`
+      guardan su propio monto aparte, usado para la deuda/meta pendiente.
+    Un reembolso (`refund_of_id`) y una confirmación de recurrente
+    (`recurring_rule_id`) SÍ se pueden editar: no hay ninguna otra fila cuyo
+    monto dependa del suyo.
+
+    Límite conocido: `debt_payments.transaction_id` guarda una sola fila
+    (prioriza la de interés cuando existen las dos, interés y capital como
+    transacciones separadas — `debt_service.record_payment`); la pata de
+    capital en ese caso puntual no queda protegida acá."""
+    if transaction.kind == "transfer":
+        return "TRANSFER_AMOUNT_EDIT_UNSUPPORTED"
+    if transaction.installment_id is not None:
+        return "INSTALLMENT_AMOUNT_LOCKED"
+    if transaction.receivable_id is not None:
+        return "RECEIVABLE_AMOUNT_LOCKED"
+
+    debt_linked = await db.execute(
+        select(DebtPayment.id).where(DebtPayment.transaction_id == transaction.id)
+    )
+    if debt_linked.first() is not None:
+        return "DEBT_PAYMENT_AMOUNT_LOCKED"
+
+    goal_linked = await db.execute(
+        select(GoalContribution.id).where(GoalContribution.transaction_id == transaction.id)
+    )
+    if goal_linked.first() is not None:
+        return "GOAL_CONTRIBUTION_AMOUNT_LOCKED"
+
+    return None
+
+
 async def update_transaction(
     db: AsyncSession, user_id: UUID, transaction_id: UUID, updates: dict[str, Any]
 ) -> Transaction:
     transaction = await _get_owned_transaction(db, user_id, transaction_id)
+    # Solo si la edición toca la categoría: un gasto viejo sin ella puede seguir
+    # editándose (monto, fecha…) hasta que se le asigne una.
+    if "category_id" in updates:
+        ensure_category_present(transaction.kind, updates["category_id"])
     if "category_id" in updates and updates["category_id"] is not None:
         category = await _get_owned_category(db, user_id, updates["category_id"])
         if category.kind != transaction.kind:
@@ -468,6 +518,38 @@ async def update_transaction(
                 field="category_id",
                 code="CATEGORY_KIND_MISMATCH",
             )
+
+    account: Account | None = None
+    new_amount = updates.get("amount_cents")
+    if new_amount is not None and new_amount != transaction.amount_cents:
+        reason = await _locked_amount_reason(db, transaction)
+        if reason is not None:
+            raise ValidationAppError(
+                "El monto de esta transacción no se puede editar directamente.",
+                field="amount_cents",
+                code=reason,
+            )
+        account = await _get_owned_account(db, user_id, transaction.account_id)
+        old_delta = signed_delta(
+            LedgerEntry(kind=transaction.kind, amount_cents=transaction.amount_cents),  # type: ignore[arg-type]
+            account.type,  # type: ignore[arg-type]
+        )
+        new_delta = signed_delta(
+            LedgerEntry(kind=transaction.kind, amount_cents=new_amount),  # type: ignore[arg-type]
+            account.type,  # type: ignore[arg-type]
+        )
+        account.current_balance_cents += new_delta - old_delta
+        account.updated_at = datetime.now(UTC)
+        # El monto en USD se congela (regla de negocio 4): se recalcula
+        # `base_amount_cents` con la MISMA fx_rate ya guardada, nunca con una
+        # tasa nueva — GTQ no tiene fx_rate y base_amount_cents == amount_cents.
+        if transaction.fx_rate is not None:
+            updates["base_amount_cents"] = (
+                Money(new_amount, transaction.currency).convert(transaction.fx_rate, "GTQ").cents
+            )
+        else:
+            updates["base_amount_cents"] = new_amount
+
     for field, value in updates.items():
         setattr(transaction, field, value)
     transaction.updated_at = datetime.now(UTC)
@@ -481,6 +563,15 @@ async def update_transaction(
         entity=transaction,
         payload=TransactionOut.model_validate(transaction).model_dump(mode="json"),
     )
+    if account is not None:
+        await record_change(
+            db,
+            user_id=user_id,
+            entity_type="account",
+            op="upsert",
+            entity=account,
+            payload=_account_payload(account),
+        )
     await _check_budget_alert(db, user_id, transaction)
     await db.commit()
     await db.refresh(transaction)

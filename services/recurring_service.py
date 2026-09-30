@@ -27,6 +27,7 @@ from schemas.recurring import (
     SubscriptionsSummaryOut,
     SubscriptionSummaryItem,
 )
+from services.category_requirement import ensure_category_present
 from services.change_log import record_change
 from storage.models.account import Account
 from storage.models.recurring import RecurringRule
@@ -46,6 +47,8 @@ async def create_rule(db: AsyncSession, user_id: UUID, data: RecurringRuleCreate
     account = await db.get(Account, data.account_id)
     if account is None or account.user_id != user_id or account.deleted_at is not None:
         raise NotFoundError("La cuenta no existe.", code="ACCOUNT_NOT_FOUND")
+
+    ensure_category_present(data.kind, data.category_id)
 
     if data.currency != "GTQ" and data.fx_rate is None:
         raise ValidationAppError(
@@ -111,7 +114,10 @@ async def update_rule(
     db: AsyncSession, user_id: UUID, rule_id: UUID, data: RecurringRuleUpdate
 ) -> RecurringRule:
     rule = await _get_owned(db, user_id, rule_id)
-    for field, value in data.model_dump(exclude_unset=True).items():
+    changes = data.model_dump(exclude_unset=True)
+    if "category_id" in changes:
+        ensure_category_present(rule.kind, changes["category_id"])
+    for field, value in changes.items():
         setattr(rule, field, value)
     rule.updated_at = datetime.now(UTC)
     await db.commit()
@@ -169,6 +175,8 @@ async def confirm_rule(
     rule = await _get_owned(db, user_id, rule_id)
     if rule.status != "active":
         raise ConflictError("Esa regla no está activa.", code="RECURRING_RULE_NOT_ACTIVE")
+    # Este camino crea la transacción sin pasar por `create_transaction`.
+    ensure_category_present(rule.kind, rule.category_id)
 
     account = await db.get(Account, rule.account_id)
     if account is None:

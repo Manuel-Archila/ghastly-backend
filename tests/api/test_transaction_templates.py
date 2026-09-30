@@ -3,7 +3,12 @@ from datetime import UTC, datetime
 
 from httpx import AsyncClient
 
-from tests.api.helpers import create_account, create_category, register_and_login
+from tests.api.helpers import (
+    create_account,
+    create_category,
+    default_expense_category,
+    register_and_login,
+)
 
 
 def _idem() -> dict[str, str]:
@@ -25,6 +30,8 @@ async def _create_template(
     name: str = "Café",
 ) -> uuid.UUID:
     template_id = uuid.uuid4()
+    if category_id is None and kind == "expense":
+        category_id = await default_expense_category(client, headers)
     payload: dict[str, object] = {
         "id": str(template_id),
         "name": name,
@@ -50,6 +57,7 @@ async def test_create_template_returns_zero_use_count(client: AsyncClient) -> No
             "name": "Café",
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 3_500,
         },
         headers=headers,
@@ -91,6 +99,7 @@ async def test_create_template_rejects_unknown_account(client: AsyncClient) -> N
             "name": "Café",
             "account_id": str(uuid.uuid4()),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 3_500,
         },
         headers=headers,
@@ -112,6 +121,7 @@ async def test_list_templates_orders_by_use_count_descending(client: AsyncClient
                 "id": str(uuid.uuid4()),
                 "account_id": str(account_id),
                 "kind": "expense",
+                "category_id": str(await default_expense_category(client, headers)),
                 "amount_cents": 5_000,
                 "date": f"{_current_month()}-05",
                 "template_id": str(more_used),
@@ -141,6 +151,7 @@ async def test_creating_transaction_without_template_id_does_not_touch_templates
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 5_000,
             "date": f"{_current_month()}-05",
         },
@@ -165,6 +176,7 @@ async def test_creating_transaction_with_unknown_template_id_fails_and_rolls_bac
             "id": str(uuid.uuid4()),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 5_000,
             "date": f"{_current_month()}-05",
             "template_id": str(uuid.uuid4()),
@@ -248,10 +260,14 @@ async def test_patch_template_updates_fields_and_keeps_use_count(client: AsyncCl
     assert data["account_id"] == str(other_account)
     assert data["category_id"] == str(category_id)  # lo omitido no se toca
 
+    # Un gasto no puede quedar sin categoría: vaciarla se rechaza y no se toca.
     cleared = await client.patch(
         f"/v1/transaction-templates/{template_id}", json={"category_id": None}, headers=headers
     )
-    assert cleared.json()["data"]["category_id"] is None
+    assert cleared.status_code == 422
+    assert cleared.json()["data"]["code"] == "CATEGORY_REQUIRED"
+    kept = await client.get(f"/v1/transaction-templates/{template_id}", headers=headers)
+    assert kept.json()["data"]["category_id"] == str(category_id)
 
 
 async def test_patch_template_validates_references(client: AsyncClient) -> None:

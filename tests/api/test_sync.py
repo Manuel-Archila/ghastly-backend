@@ -3,7 +3,12 @@ from datetime import UTC, datetime, timedelta
 
 from httpx import AsyncClient
 
-from tests.api.helpers import create_account, create_category, register_and_login_with_device
+from tests.api.helpers import (
+    create_account,
+    create_category,
+    default_expense_category,
+    register_and_login_with_device,
+)
 
 
 async def test_pull_returns_changes_since_cursor(client: AsyncClient) -> None:
@@ -121,6 +126,7 @@ async def test_two_devices_edit_same_transaction_last_write_wins(client: AsyncCl
             "id": str(txn_id),
             "account_id": str(account_id),
             "kind": "expense",
+            "category_id": str(await default_expense_category(client, headers)),
             "amount_cents": 500,
             "date": "2026-09-04",
             "description": "original",

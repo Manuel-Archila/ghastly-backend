@@ -36,10 +36,14 @@ class TransactionCreate(BaseModel):
 
 class TransactionUpdate(PatchModel):
     non_nullable = frozenset(
-        {"date", "is_reconciled", "is_tax_relevant", "is_extraordinary", "tags"}
+        {"date", "amount_cents", "is_reconciled", "is_tax_relevant", "is_extraordinary", "tags"}
     )
     category_id: UUID | None = None
     date: date_ | None = None
+    # El monto se puede corregir, pero no en cualquier transacción — ver
+    # `transaction_service._locked_amount_reason`. El saldo de la cuenta se
+    # recalcula en la misma transacción de DB (regla de negocio 6).
+    amount_cents: int | None = Field(default=None, gt=0)
     description: str | None = Field(default=None, max_length=500)
     merchant: str | None = Field(default=None, max_length=255)
     notes: str | None = None
