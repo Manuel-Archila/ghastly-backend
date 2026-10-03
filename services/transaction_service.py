@@ -613,9 +613,25 @@ async def update_transaction(
 
 
 async def delete_transaction(db: AsyncSession, user_id: UUID, transaction_id: UUID) -> None:
-    """Borrado lógico. NO revierte el saldo (igual que un `DELETE` de cualquier
-    fila con historia contable): para corregir el saldo se usa `/recalculate`."""
+    """Borrado lógico. Revierte el saldo que esta transacción había aplicado
+    (regla de negocio 6: el saldo es derivado y se recalcula en la misma
+    transacción de DB que escribe el movimiento — un borrado también escribe).
+    Sin esto, el cliente revierte el saldo local al borrar pero el servidor
+    no, y el próximo `account` change_log que emita CUALQUIER otra escritura
+    en la misma cuenta pisa el saldo local correcto con el del servidor, que
+    sigue contando la transacción borrada — el monto "reaparece".
+    Las patas de transferencia no se revierten acá, igual que el cliente
+    (`repositories/transactions.ts::deleteTransactionLocally`): su saldo se
+    corrige aparte, no desde una transacción suelta."""
     transaction = await _get_owned_transaction(db, user_id, transaction_id)
+    account: Account | None = None
+    if transaction.kind != "transfer":
+        account = await _get_owned_account(db, user_id, transaction.account_id)
+        account.current_balance_cents -= signed_delta(
+            LedgerEntry(kind=transaction.kind, amount_cents=transaction.amount_cents),  # type: ignore[arg-type]
+            account.type,  # type: ignore[arg-type]
+        )
+        account.updated_at = datetime.now(UTC)
     transaction.deleted_at = datetime.now(UTC)
     transaction.updated_at = datetime.now(UTC)
 
@@ -628,11 +644,29 @@ async def delete_transaction(db: AsyncSession, user_id: UUID, transaction_id: UU
         entity=transaction,
         payload={"id": str(transaction.id)},
     )
+    if account is not None:
+        await record_change(
+            db,
+            user_id=user_id,
+            entity_type="account",
+            op="upsert",
+            entity=account,
+            payload=_account_payload(account),
+        )
     await db.commit()
 
 
 async def restore_transaction(db: AsyncSession, user_id: UUID, transaction_id: UUID) -> Transaction:
+    """Simétrico a `delete_transaction`: si el borrado restó, restaurar suma."""
     transaction = await _get_owned_transaction(db, user_id, transaction_id, include_deleted=True)
+    account: Account | None = None
+    if transaction.kind != "transfer":
+        account = await _get_owned_account(db, user_id, transaction.account_id)
+        account.current_balance_cents += signed_delta(
+            LedgerEntry(kind=transaction.kind, amount_cents=transaction.amount_cents),  # type: ignore[arg-type]
+            account.type,  # type: ignore[arg-type]
+        )
+        account.updated_at = datetime.now(UTC)
     transaction.deleted_at = None
     transaction.updated_at = datetime.now(UTC)
 
@@ -645,6 +679,15 @@ async def restore_transaction(db: AsyncSession, user_id: UUID, transaction_id: U
         entity=transaction,
         payload=TransactionOut.model_validate(transaction).model_dump(mode="json"),
     )
+    if account is not None:
+        await record_change(
+            db,
+            user_id=user_id,
+            entity_type="account",
+            op="upsert",
+            entity=account,
+            payload=_account_payload(account),
+        )
     await _check_budget_alert(db, user_id, transaction)
     await db.commit()
     await db.refresh(transaction)

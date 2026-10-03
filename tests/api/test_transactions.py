@@ -435,17 +435,28 @@ async def test_soft_delete_and_restore(client: AsyncClient) -> None:
         headers={**headers, **_idem()},
     )
 
+    account_after_create = await client.get(f"/v1/accounts/{account_id}", headers=headers)
+    assert account_after_create.json()["data"]["current_balance_cents"] == 900
+
     delete = await client.delete(f"/v1/transactions/{txn_id}", headers=headers)
     assert delete.status_code == 200
 
     get_after_delete = await client.get(f"/v1/transactions/{txn_id}", headers=headers)
     assert get_after_delete.status_code == 404
 
+    # Si el borrado no revierte el saldo, el gasto "reaparece" en cuanto
+    # cualquier otra escritura en la cuenta vuelva a sincronizar su balance.
+    account_after_delete = await client.get(f"/v1/accounts/{account_id}", headers=headers)
+    assert account_after_delete.json()["data"]["current_balance_cents"] == 1_000
+
     restore = await client.post(f"/v1/transactions/{txn_id}/restore", headers=headers)
     assert restore.status_code == 200
 
     get_after_restore = await client.get(f"/v1/transactions/{txn_id}", headers=headers)
     assert get_after_restore.status_code == 200
+
+    account_after_restore = await client.get(f"/v1/accounts/{account_id}", headers=headers)
+    assert account_after_restore.json()["data"]["current_balance_cents"] == 900
 
 
 async def test_cross_user_cannot_read_transaction(client: AsyncClient) -> None:
