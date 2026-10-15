@@ -34,7 +34,7 @@ from schemas.budgets import (
 )
 from schemas.categories import CategoryCreate, CategoryOut, CategoryUpdate
 from schemas.sync import SyncChangeOut, SyncConflictOut, SyncMutationIn, SyncPullOut, SyncPushResult
-from schemas.transactions import TransactionCreate, TransactionOut
+from schemas.transactions import TransactionCreate, TransactionOut, TransactionUpdate
 from services import account_service, budget_service, category_service, transaction_service
 from storage.models.auth import Device
 from storage.models.budget import BudgetItem
@@ -211,7 +211,10 @@ async def _apply_transaction(
         )
 
     filtered = {k: v for k, v in mutation.payload.items() if k in TRANSACTION_EDITABLE_FIELDS}
-    await transaction_service.update_transaction(db, user_id, mutation.entity_id, filtered)
+    # Mismo schema que `PATCH /transactions/{id}`: coacciona `date` (llega como
+    # string ISO) y rechaza `null` en columnas NOT NULL antes de tocar la DB.
+    updates = TransactionUpdate.model_validate(filtered).model_dump(exclude_unset=True)
+    await transaction_service.update_transaction(db, user_id, mutation.entity_id, updates)
     return True, None, None
 
 
