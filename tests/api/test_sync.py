@@ -324,3 +324,58 @@ async def test_push_with_invalid_mutation_does_not_break_the_batch(client: Async
 
     unchanged = await client.get(f"/v1/accounts/{account_id}", headers=headers)
     assert unchanged.json()["data"]["name"] == "Original"
+
+
+async def test_push_edit_with_date_and_amount_updates_transaction(client: AsyncClient) -> None:
+    """El cliente empuja la fila editada completa: `date` viaja como string ISO
+    y `amount_cents` cambia. Debe aplicarse y ajustar el saldo, no dar 500."""
+    headers, device_id = await register_and_login_with_device(client)
+    account_id = await create_account(client, headers, initial_balance_cents=10_000)
+    category_id = await default_expense_category(client, headers)
+
+    txn_id = uuid.uuid4()
+    await client.post(
+        "/v1/transactions",
+        json={
+            "id": str(txn_id),
+            "account_id": str(account_id),
+            "kind": "expense",
+            "category_id": str(category_id),
+            "amount_cents": 500,
+            "date": "2026-09-04",
+            "description": "original",
+        },
+        headers={**headers, "Idempotency-Key": str(uuid.uuid4())},
+    )
+
+    response = await client.post(
+        "/v1/sync/push",
+        json={
+            "device_id": str(device_id),
+            "mutations": [
+                {
+                    "client_mutation_id": str(uuid.uuid4()),
+                    "entity_type": "transaction",
+                    "entity_id": str(txn_id),
+                    "op": "upsert",
+                    "payload": {
+                        "category_id": str(category_id),
+                        "amount_cents": 800,
+                        "date": "2026-09-05",
+                        "description": "editado",
+                        "tags": ["a"],
+                    },
+                    "client_updated_at": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+                }
+            ],
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["conflicts"] == [], response.text
+
+    txn = (await client.get(f"/v1/transactions/{txn_id}", headers=headers)).json()["data"]
+    assert txn["amount_cents"] == 800
+    assert txn["date"] == "2026-09-05"
+    account = await client.get(f"/v1/accounts/{account_id}", headers=headers)
+    assert account.json()["data"]["current_balance_cents"] == 9_200
